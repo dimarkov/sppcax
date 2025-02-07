@@ -1,11 +1,15 @@
-sppcax
-
 ======
 sppcax
 ======
 
 
-    Add a short description here!
+     Sparse Probabilistic Principal Component Analysis with Bayesian Model Reduction
+
+ SPPCAX is a Python implementation of sparse probabilistic principal component
+ analysis (SPPCA) using Bayesian model reduction and coordinate ascent
+ variational inference. This method provides an efficient way to perform
+ dimensionality reduction while automatically determining the optimal number of
+ components and encouraging sparsity in the loading matrix.
 
 
 A longer description of your project goes here...
