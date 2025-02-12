@@ -134,9 +134,14 @@ def test_kl_divergence():
     assert jnp.all(kl >= 0)
 
     # Test MultivariateNormal KL divergence
-    dim = 2
-    dist1 = MultivariateNormal(dim)
-    dist2 = MultivariateNormal(dim)
+    loc1 = jnp.array([0.0, 1.0])
+    loc2 = jnp.array([1.0, 0.0])
+    scale_tril1 = jnp.array([[1.0, 0.0], [0.5, 1.0]])
+    scale_tril2 = jnp.array([[2.0, 0.0], [0.3, 0.5]])
+    mask = jnp.array([True, False])  # Test with mask
+
+    dist1 = MultivariateNormal(loc=loc1, scale_tril=scale_tril1, mask=mask)
+    dist2 = MultivariateNormal(loc=loc2, scale_tril=scale_tril2, mask=mask)
 
     kl = dist1.kl_divergence(dist2)
     assert kl.shape == ()
@@ -165,38 +170,53 @@ def test_kl_divergence():
 
 def test_multivariate_normal_distribution():
     """Test MultivariateNormal distribution implementation."""
-    # Test initialization with natural parameters
-    dim = 2
-    dist = MultivariateNormal(dim)
+    # Test initialization with loc only (identity scale)
+    loc = jnp.array([1.0, 2.0])
+    dist = MultivariateNormal(loc=loc)
 
     # Test shapes
     assert dist.batch_shape == ()
-    assert dist.event_shape == (dim,)
-    assert dist.nat1.shape == (dim,)
-    assert dist.nat2.shape == (dim, dim)
+    assert dist.event_shape == (2,)
+    assert dist.nat1.shape == (2,)
+    assert dist.nat2.shape == (2, 2)
 
     # Test parameter properties
-    precision = -2.0 * dist.nat2
-    mean = jnp.linalg.solve(precision, dist.nat1)
-    assert jnp.allclose(mean, jnp.zeros(dim))  # Standard normal mean
-    assert jnp.allclose(precision, jnp.eye(dim))  # Standard normal precision
+    assert jnp.allclose(dist.mean, loc)
+    assert jnp.allclose(dist.precision, jnp.eye(2))
+
+    # Test initialization with scale_tril
+    scale_tril = jnp.array([[1.0, 0.0], [0.5, 1.0]])
+    dist = MultivariateNormal(loc=loc, scale_tril=scale_tril)
+    assert jnp.allclose(dist.mean, loc)
+
+    # Test initialization with covariance
+    covariance = jnp.array([[2.0, 0.5], [0.5, 1.0]])
+    dist = MultivariateNormal(loc=loc, covariance=covariance)
+    assert jnp.allclose(dist.mean, loc)
+
+    # Test initialization with precision
+    precision = jnp.array([[2.0, -0.5], [-0.5, 1.0]])
+    dist = MultivariateNormal(loc=loc, precision=precision)
+    assert jnp.allclose(dist.mean, loc)
+
+    # Test error on multiple scale parameters
+    try:
+        dist = MultivariateNormal(loc=loc, scale_tril=scale_tril, covariance=covariance)
+        assert False, "Should raise ValueError"
+    except ValueError:
+        pass
 
     # Test natural parameters
     eta = dist.natural_parameters
-    assert eta.shape == (dim + dim * dim,)  # [nat1, vec(nat2)]
-
-    # Test log probability
-    x = jnp.array([0.0, 0.0])
-    log_prob = dist.log_prob(x)
-    assert log_prob.shape == ()
+    assert eta.shape == (6,)  # [nat1(2), vec(nat2)(4)]
 
     # Test sampling
     key = jr.PRNGKey(0)
     samples = dist.sample(key, sample_shape=(100,))
-    assert samples.shape == (100, dim)
+    assert samples.shape == (100, 2)
 
     # Test log probability with samples
-    test_samples = samples[:5]  # Use first 5 samples for testing
+    test_samples = samples[:5]
     log_probs = dist.log_prob(test_samples)
     assert log_probs.shape == (5,)
     assert jnp.all(jnp.isfinite(log_probs))
@@ -210,6 +230,66 @@ def test_multivariate_normal_distribution():
     entropy = dist.entropy
     assert entropy.shape == ()
     assert entropy >= 0
+
+
+def test_multivariate_normal_masking():
+    """Test MultivariateNormal masking functionality."""
+    # Test basic masking
+    loc = jnp.array([1.0, 2.0, 3.0])
+    mask = jnp.array([True, False, True])
+    dist = MultivariateNormal(loc=loc, mask=mask)
+
+    # Test masked mean
+    assert jnp.allclose(dist.mean, jnp.array([1.0, 0.0, 3.0]))
+
+    # Test masked precision
+    expected_precision = jnp.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    assert jnp.allclose(dist.precision, expected_precision)
+
+    # Test sampling with mask
+    key = jr.PRNGKey(0)
+    samples = dist.sample(key, sample_shape=(100,))
+    assert jnp.allclose(samples[:, 1], 0.0)  # Masked dimension should be zero
+
+    # Test log_prob with mask
+    x = jnp.array([1.0, 0.0, 1.0])
+    log_prob = dist.log_prob(x)
+    assert jnp.isfinite(log_prob)
+
+    # Test with scale_tril and mask
+    scale_tril = jnp.array([[1.0, 0.0, 0.0], [0.5, 1.0, 0.0], [0.3, 0.2, 1.0]])
+    dist = MultivariateNormal(loc=loc, scale_tril=scale_tril, mask=mask)
+    samples = dist.sample(key, sample_shape=(100,))
+    assert jnp.allclose(samples[:, 1], 0.0)  # Masked dimension should be zero
+
+
+def test_multivariate_normal_batch_masking():
+    """Test MultivariateNormal with batched masking."""
+    # Test batched masking
+    loc = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+    mask = jnp.array([[True, False], [False, True]])
+    dist = MultivariateNormal(loc=loc, mask=mask)
+
+    # Test batch shapes
+    assert dist.batch_shape == (2,)
+    assert dist.event_shape == (2,)
+
+    # Test masked means
+    expected_means = jnp.array([[1.0, 0.0], [0.0, 4.0]])
+    assert jnp.allclose(dist.mean, expected_means)
+
+    # Test sampling with batched mask
+    key = jr.PRNGKey(0)
+    samples = dist.sample(key, sample_shape=(100,))
+    assert samples.shape == (100, 2, 2)
+    assert jnp.allclose(samples[:, 0, 1], 0.0)  # Second dim of first batch
+    assert jnp.allclose(samples[:, 1, 0], 0.0)  # First dim of second batch
+
+    # Test log_prob with batched mask
+    x = jnp.array([[1.0, 0.0], [0.0, 1.0]])
+    log_prob = dist.log_prob(x)
+    assert log_prob.shape == (2,)
+    assert jnp.all(jnp.isfinite(log_prob))
 
 
 def test_categorical_distribution():
@@ -336,9 +416,17 @@ def test_broadcasting():
     assert jnp.allclose(dist.alpha, jnp.full(2, alpha))
 
     # Test MultivariateNormal broadcasting
-    dim = 2
-    dist1 = MultivariateNormal(dim)  # No broadcasting
-    assert dist1.batch_shape == ()
+    loc = jnp.array([[1.0, 2.0], [3.0, 4.0]])  # shape (2, 2)
+    scale_tril = jnp.array([1.0, 0.0, 0.5, 1.0]).reshape(2, 2)  # shape (2, 2)
+    mask = jnp.array([[True, False], [True, True]])  # shape (2, 2)
+
+    # Broadcasting mask to match loc's batch shape
+    dist = MultivariateNormal(loc=loc, scale_tril=scale_tril, mask=mask)
+    assert dist.batch_shape == (2,)
+    assert dist.event_shape == (2,)
+
+    # Test that mask is properly broadcast
+    assert jnp.all(dist.mean[0, 1] == 0.0)  # Second dimension of the first batch is masked
 
     # Test Categorical broadcasting
     logits = jnp.array([1.0, -1.0])  # No broadcasting

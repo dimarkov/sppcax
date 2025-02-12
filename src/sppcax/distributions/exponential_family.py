@@ -118,6 +118,7 @@ class ExponentialFamily(Distribution):
         # Sum over natural parameter dimensions
         inner_product = jnp.sum(eta * T_x, axis=tuple(range(-len(self.natural_param_shape), 0)))
         log_prob = inner_product - self.log_normalizer + self.log_base_measure(x)
+        print(inner_product.shape, self.log_normalizer.shape, self.log_base_measure(x).shape)
 
         return jnp.where(valid, log_prob, -jnp.inf)
 

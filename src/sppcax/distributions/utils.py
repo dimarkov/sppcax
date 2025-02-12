@@ -35,7 +35,7 @@ def safe_cholesky_and_logdet(X: Array, jitter: float = 1e-12) -> tuple[Array, Sc
         and logdet is the log determinant of X.
     """
     L = safe_cholesky(X, jitter=jitter)
-    logdet = 2.0 * jnp.sum(jnp.log(jnp.diag(L)))
+    logdet = 2.0 * jnp.sum(jnp.log(jnp.diagonal(L, axis1=-1, axis2=-2)), -1)
     return L, logdet
 
 
