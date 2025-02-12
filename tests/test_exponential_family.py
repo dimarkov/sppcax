@@ -2,7 +2,7 @@
 
 import jax.numpy as jnp
 import jax.random as jr
-from sppcax.distributions import Bernoulli, Categorical, Gamma, MultivariateNormal, Normal, Poisson
+from sppcax.distributions import Categorical, Gamma, MultivariateNormal, Normal, Poisson
 
 
 def test_normal_distribution():
@@ -40,45 +40,16 @@ def test_normal_distribution():
     samples = dist.sample(key, sample_shape=(100,))
     assert samples.shape == (100,) + dist.batch_shape + dist.event_shape
 
-    # Test entropy
-    entropy = dist.entropy
-    assert entropy.shape == dist.batch_shape
-    assert jnp.all(entropy >= 0)
+    # Test log probability with samples
+    test_samples = samples[:5]  # Use first 5 samples for testing
+    log_probs = dist.log_prob(test_samples)
+    assert log_probs.shape == (5,) + dist.batch_shape
+    assert jnp.all(jnp.isfinite(log_probs))
 
-
-def test_bernoulli_distribution():
-    """Test Bernoulli distribution implementation."""
-    # Test initialization with logits
-    logits = jnp.array([1.0, -1.0])
-    dist = Bernoulli(logits=logits)
-
-    # Test shapes
-    assert dist.batch_shape == (2,)
-    assert dist.event_shape == ()
-
-    # Test natural parameters
-    eta = dist.natural_parameters
-    assert eta.shape == dist.batch_shape + (1,)
-    assert jnp.allclose(eta[..., 0], logits)
-
-    # Test parameter conversion
-    dist2 = Bernoulli.from_natural_parameters(eta)
-    assert jnp.allclose(dist2.logits, dist.logits)
-
-    # Test probabilities
-    probs = dist.probs
-    assert jnp.all((probs >= 0) & (probs <= 1))
-
-    # Test log probability
-    x = jnp.array([1, 0])
-    log_prob = dist.log_prob(x)
-    assert log_prob.shape == dist.batch_shape
-
-    # Test sampling
-    key = jr.PRNGKey(0)
-    samples = dist.sample(key, sample_shape=(100,))
-    assert samples.shape == (100,) + dist.batch_shape + dist.event_shape
-    assert jnp.all((samples == 0) | (samples == 1))
+    # Verify symmetry around mean for equidistant points
+    x1 = loc + scale
+    x2 = loc - scale
+    assert jnp.allclose(dist.log_prob(x1), dist.log_prob(x2))
 
     # Test entropy
     entropy = dist.entropy
@@ -123,6 +94,17 @@ def test_gamma_distribution():
     assert samples.shape == (100,) + dist.batch_shape + dist.event_shape
     assert jnp.all(samples > 0)
 
+    # Test log probability with samples
+    test_samples = samples[:5]  # Use first 5 samples for testing
+    log_probs = dist.log_prob(test_samples)
+    assert log_probs.shape == (5,) + dist.batch_shape
+    assert jnp.all(jnp.isfinite(log_probs))
+
+    # Test invalid values (out of range)
+    invalid_samples = jnp.array([-1, 0])  # negative
+    invalid_log_probs = dist.log_prob(invalid_samples)
+    assert jnp.all(jnp.isneginf(invalid_log_probs))
+
     # Test entropy
     entropy = dist.entropy
     assert entropy.shape == dist.batch_shape
@@ -136,16 +118,6 @@ def test_kl_divergence():
     loc2, scale2 = jnp.array([1.0, 0.0]), jnp.array([2.0, 1.0])
     dist1 = Normal(loc=loc1, scale=scale1)
     dist2 = Normal(loc=loc2, scale=scale2)
-
-    kl = dist1.kl_divergence(dist2)
-    assert kl.shape == dist1.batch_shape
-    assert jnp.all(kl >= 0)
-
-    # Test Bernoulli KL divergence
-    logits1 = jnp.array([1.0, -1.0])
-    logits2 = jnp.array([0.0, 0.0])
-    dist1 = Bernoulli(logits=logits1)
-    dist2 = Bernoulli(logits=logits2)
 
     kl = dist1.kl_divergence(dist2)
     assert kl.shape == dist1.batch_shape
@@ -223,6 +195,17 @@ def test_multivariate_normal_distribution():
     samples = dist.sample(key, sample_shape=(100,))
     assert samples.shape == (100, dim)
 
+    # Test log probability with samples
+    test_samples = samples[:5]  # Use first 5 samples for testing
+    log_probs = dist.log_prob(test_samples)
+    assert log_probs.shape == (5,)
+    assert jnp.all(jnp.isfinite(log_probs))
+
+    # Test vectorized inputs
+    batch_log_probs = dist.log_prob(samples)
+    assert batch_log_probs.shape == (100,)
+    assert jnp.all(jnp.isfinite(batch_log_probs))
+
     # Test entropy
     entropy = dist.entropy
     assert entropy.shape == ()
@@ -264,6 +247,17 @@ def test_categorical_distribution():
     samples = dist.sample(key, sample_shape=(100,))
     assert samples.shape == (100,)
     assert jnp.all((samples >= 0) & (samples <= 2))
+
+    # Test log probability with samples
+    test_samples = samples[:5]  # Use first 5 samples for testing
+    log_probs = dist.log_prob(test_samples)
+    assert log_probs.shape == (5,) + dist.batch_shape
+    assert jnp.all(jnp.isfinite(log_probs))
+
+    # Test invalid values (negative and to large)
+    invalid_samples = jnp.array([-1, 4])  # negative and to large
+    invalid_log_probs = dist.log_prob(invalid_samples)
+    assert jnp.all(jnp.isneginf(invalid_log_probs))
 
     # Test entropy
     entropy = dist.entropy
@@ -308,6 +302,17 @@ def test_poisson_distribution():
     assert samples.shape == (100, 2)
     assert jnp.all(samples >= 0)
 
+    # Test log probability with samples
+    test_samples = samples[:5]  # Use first 5 samples for testing
+    log_probs = dist.log_prob(test_samples)
+    assert log_probs.shape == (5, 2)
+    assert jnp.all(jnp.isfinite(log_probs))
+
+    # Test invalid values (negative)
+    invalid_samples = jnp.array([-1, -2])  # negative values
+    invalid_log_probs = dist.log_prob(invalid_samples)
+    assert jnp.all(jnp.isneginf(invalid_log_probs))
+
     # Test entropy
     entropy = dist.entropy
     assert entropy.shape == (2,)
@@ -322,11 +327,6 @@ def test_broadcasting():
     dist = Normal(loc=loc, scale=scale)
     assert dist.batch_shape == (2,)
     assert jnp.allclose(dist.scale, jnp.ones(2))
-
-    # Test Bernoulli broadcasting
-    logits = 0.0
-    dist = Bernoulli(logits=logits)
-    assert dist.batch_shape == ()
 
     # Test Gamma broadcasting
     alpha = 2.0

@@ -9,6 +9,8 @@ import jax.random as jr
 from ..types import Array, PRNGKey, Shape
 from .exponential_family import ExponentialFamily
 
+MAXF = jnp.finfo(jnp.dtype(jnp.array(0.0).dtype)).max
+
 
 class Categorical(ExponentialFamily):
     """Categorical distribution parameterized by logits.
@@ -65,6 +67,11 @@ class Categorical(ExponentialFamily):
             Natural parameters η.
         """
         return self.nat1
+
+    def _check_support(self, x: Array) -> Array:
+        """Check if values are within distribution support."""
+        n_categories = self.nat1.shape[-1] + 1
+        return (x >= 0) & (x < n_categories)
 
     def sufficient_statistics(self, x: Array) -> Array:
         """Compute sufficient statistics T(x).

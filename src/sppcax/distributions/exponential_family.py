@@ -88,6 +88,18 @@ class ExponentialFamily(Distribution):
         """
         return jnp.zeros(())  # Default to h(x) = 1
 
+    def _check_support(self, x: Array) -> Array:
+        """Check if values are within distribution support.
+
+        Args:
+            x: Values to check.
+               Shape: batch_shape + event_shape
+
+        Returns:
+            Boolean mask of valid values with shape matching x's batch dimensions.
+        """
+        return jnp.ones(x.shape[: -len(self.event_shape)], dtype=bool)  # Default: all values valid
+
     def log_prob(self, x: Array) -> Array:
         """Compute log probability.
 
@@ -97,14 +109,17 @@ class ExponentialFamily(Distribution):
 
         Returns:
             Log probability log p(x|η) with shape: batch_shape
+            Returns -inf for values outside the support.
         """
+        valid = self._check_support(x)
         eta = self.natural_parameters  # batch_shape + natural_param_shape
         T_x = self.sufficient_statistics(x)  # batch_shape + natural_param_shape
 
         # Sum over natural parameter dimensions
         inner_product = jnp.sum(eta * T_x, axis=tuple(range(-len(self.natural_param_shape), 0)))
+        log_prob = inner_product - self.log_normalizer + self.log_base_measure(x)
 
-        return inner_product - self.log_normalizer + self.log_base_measure(x)
+        return jnp.where(valid, log_prob, -jnp.inf)
 
     @property
     def expected_log_base_measure(self) -> Array:

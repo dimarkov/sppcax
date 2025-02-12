@@ -1,7 +1,6 @@
 """Distribution classes."""
 
 from .base import Distribution
-from .bernoulli import Bernoulli
 from .categorical import Categorical
 from .exponential_family import ExponentialFamily
 from .gamma import Gamma
@@ -14,7 +13,6 @@ __all__ = [
     "ExponentialFamily",
     "Normal",
     "MultivariateNormal",
-    "Bernoulli",
     "Categorical",
     "Poisson",
     "Gamma",

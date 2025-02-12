@@ -89,6 +89,18 @@ class Poisson(ExponentialFamily):
         """
         return jnp.exp(self.nat1)
 
+    def _check_support(self, x: Array) -> Array:
+        """Check if values are within distribution support.
+
+        Args:
+            x: Values to check.
+               Shape: batch_shape + event_shape
+
+        Returns:
+            Boolean mask of valid values.
+        """
+        return x >= 0
+
     def log_base_measure(self, x: Array) -> Array:
         """Compute log base measure log(h(x)) = -log(x!).
 

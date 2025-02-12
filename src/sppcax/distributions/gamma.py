@@ -106,6 +106,18 @@ class Gamma(ExponentialFamily):
         beta = self.beta
         return jsp.gammaln(alpha) - alpha * jnp.log(beta)
 
+    def _check_support(self, x: Array) -> Array:
+        """Check if values are within distribution support.
+
+        Args:
+            x: Values to check.
+               Shape: batch_shape + event_shape
+
+        Returns:
+            Boolean mask of valid values.
+        """
+        return x > 0
+
     def log_base_measure(self, x: Array = None) -> Array:
         """Compute log of base measure h(x).
 
