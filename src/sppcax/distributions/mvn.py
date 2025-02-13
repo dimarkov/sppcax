@@ -78,7 +78,7 @@ class MultivariateNormal(ExponentialFamily):
             scale_tril = jnp.broadcast_to(scale_tril, (*batch_shape, dim, dim))
             if scale_tril.shape != (*batch_shape, dim, dim):
                 raise ValueError(f"Scale_tril shape {scale_tril.shape} must match loc batch shape")
-            P = qr_inv(scale_tril @ scale_tril.T)
+            P = qr_inv(scale_tril @ scale_tril.mT)
         else:
             # Default to identity matrix with proper broadcasting
             P = jnp.broadcast_to(jnp.eye(dim), (*batch_shape, dim, dim))
@@ -103,7 +103,7 @@ class MultivariateNormal(ExponentialFamily):
         """
         return jnp.where(self.mask, x, 0.0)
 
-    def _apply_mask_matrix(self, x: Array) -> Array:
+    def _apply_mask_matrix(self, x: Array, zeromask: bool = False) -> Array:
         """Apply mask to a matrix, zeroing out masked rows and columns.
 
         Args:
@@ -113,7 +113,11 @@ class MultivariateNormal(ExponentialFamily):
             Masked matrix with same shape
         """
         mask_mat = self.mask[..., None] * self.mask[..., None, :]
-        return jnp.where(mask_mat, x, jnp.eye(x.shape[-1]))
+
+        if zeromask:
+            return jnp.where(mask_mat, x, jnp.zeros((x.shape[-1], x.shape[-1])))
+        else:
+            return jnp.where(mask_mat, x, jnp.eye(x.shape[-1]))
 
     @classmethod
     def from_natural_parameters(cls, nat1: Array, nat2: Array, mask: Optional[Array] = None) -> "MultivariateNormal":
@@ -136,6 +140,10 @@ class MultivariateNormal(ExponentialFamily):
         """Get mean parameter."""
         mean = solve(self.precision, self.nat1, assume_a="pos")
         return self._apply_mask_vector(mean)
+
+    @property
+    def covariance(self) -> Array:
+        return self._apply_mask_matrix(qr_inv(-2.0 * self.nat2), zeromask=True)
 
     @property
     def precision(self) -> Array:
@@ -162,15 +170,14 @@ class MultivariateNormal(ExponentialFamily):
         Returns:
             Expected sufficient statistics [E[x], vec(E[xx^T])].
         """
-        precision = self.precision
-        mean = self._apply_mask_vector(jnp.linalg.solve(precision, self.nat1))
-        cov = qr_inv(precision)
-        cov = self._apply_mask_matrix(cov)
 
-        mean_outer = mean[..., None] * mean[..., None, :]
+        E_x = self.mean
+        cov = self.covariance
+
+        mean_outer = E_x[..., None] * E_x[..., None, :]
         E_xx = mean_outer + cov
 
-        return jnp.concatenate([mean, E_xx.reshape(*mean.shape[:-1], -1)], axis=-1)
+        return jnp.concatenate([E_x, E_xx.reshape(*E_x.shape[:-1], -1)], axis=-1)
 
     @property
     def natural_parameters(self) -> Array:

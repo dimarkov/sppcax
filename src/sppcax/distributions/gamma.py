@@ -23,11 +23,13 @@ class Gamma(ExponentialFamily):
     A(η) = log(Γ(η₁ + 1)) - (η₁ + 1)*log(-η₂)
     """
 
-    nat1: Array  # First natural parameter (α-1)
-    nat2: Array  # Second natural parameter (-β)
+    nat1_0: Array  # prior value of the first naural parameter (α0 - 1)
+    nat2_0: Array  # prior value of the second natural parameter (-β0)
+    dnat1: Array  # Change in the first natural parameter (α-1)
+    dnat2: Array  # Change in the second natural parameter (-β)
     natural_param_shape: ClassVar[Shape] = (2,)  # [η₁, η₂]
 
-    def __init__(self, alpha: Array = 1.0, beta: Array = 1.0):
+    def __init__(self, alpha0: Array = 1.0, beta0: Array = 1.0):
         """Initialize gamma distribution with alpha (shape) and beta (rate) parameters.
 
         Args:
@@ -35,20 +37,28 @@ class Gamma(ExponentialFamily):
             beta: Rate parameter β (default: 1.0)
         """
         # Convert to arrays
-        shape = jnp.asarray(alpha)
-        rate = jnp.asarray(beta)
-
-        # Convert to natural parameters
-        self.nat1 = shape - 1.0  # α-1
-        self.nat2 = -rate  # -β
+        shape = jnp.asarray(alpha0)
+        rate = jnp.asarray(beta0)
 
         # Set shapes
         batch_shape = jnp.broadcast_shapes(jnp.shape(shape), jnp.shape(rate))
         super().__init__(batch_shape=batch_shape, event_shape=())
 
+        # Convert to natural parameters
+        self.nat1_0 = shape - 1  # α-1
+        self.nat2_0 = jnp.broadcast_to(-rate, self.batch_shape)  # -β
+
         # Broadcast parameters
-        self.nat1 = jnp.broadcast_to(self.nat1, self.batch_shape)
-        self.nat2 = jnp.broadcast_to(self.nat2, self.batch_shape)
+        self.dnat1 = jnp.zeros(())
+        self.dnat2 = jnp.zeros(self.batch_shape)
+
+    @property
+    def nat1(self) -> Array:
+        return self.nat1_0 + self.dnat1
+
+    @property
+    def nat2(self) -> Array:
+        return self.nat2_0 + self.dnat2
 
     @property
     def alpha(self) -> Array:
@@ -59,6 +69,10 @@ class Gamma(ExponentialFamily):
     def beta(self) -> Array:
         """Get rate parameter β."""
         return -self.nat2
+
+    @property
+    def mean(self) -> Array:
+        return self.alpha / self.beta
 
     @property
     def natural_parameters(self) -> Array:
@@ -157,4 +171,4 @@ class Gamma(ExponentialFamily):
         shape = eta[..., 0] + 1.0  # α = η₁ + 1
         rate = -eta[..., 1]  # β = -η₂
 
-        return cls(alpha=shape, beta=rate)
+        return cls(alpha0=shape, beta0=rate)
