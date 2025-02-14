@@ -95,18 +95,19 @@ class BayesianFactorAnalysis(Model):
 
         return self.data_mask
 
-    def _e_step(self, X: Array) -> MultivariateNormal:
+    def _e_step(self, X: Array, use_data_mask: bool = True) -> MultivariateNormal:
         """E-step: Compute expected latent variables.
 
         Args:
             X: Data matrix of shape (n_samples, n_features)
+            use_data_mask: apply data mask (default True)
 
         Returns:
             Tuple of:
                 Ez: Expected factors E[z|x] of shape (n_samples, n_components)
                 Ezz: Expected factor outer products E[zz'|x] of shape (n_components, n_components)
         """
-        mask = self._validate_mask(X)
+        mask = self._validate_mask(X) if use_data_mask else jnp.ones_like(X, dtype=bool)
         X_centered = X - self.mean_
 
         # Get current loading matrix and noise precision
@@ -217,16 +218,17 @@ class BayesianFactorAnalysis(Model):
 
         return model, lls
 
-    def transform(self, X: Array) -> Array:
+    def transform(self, X: Array, use_data_mask: bool = False) -> Array:
         """Apply dimensionality reduction to X.
 
         Args:
             X: Data matrix of shape (n_samples, n_features)
+            use_data_mask: apply data mask (default False)
 
         Returns:
             X_new: Transformed data of shape (n_samples, n_components)
         """
-        qz = self._e_step(X)
+        qz = self._e_step(X, use_data_mask=use_data_mask)
         return qz
 
     def inverse_transform(self, Z: Array) -> Array:
