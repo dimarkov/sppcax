@@ -119,17 +119,16 @@ class BayesianFactorAnalysis(Model):
         sqrt_noise_precision = jnp.where(mask, sqrt_noise_precision, 0.0)
 
         # Compute posterior parameters
-        scaled_W = W * sqrt_noise_precision
+        scaled_W = W * sqrt_noise_precision[..., None, :]
         exp_cov = jnp.sum(self.W_dist.expected_covariance, 0)
         P = exp_cov + scaled_W @ scaled_W.mT + jnp.eye(self.n_components)
         q, r = jnp.linalg.qr(P)
         q_inv = q.mT
 
         # Compute expectations
-        _r = jnp.broadcast_to(r, X_centered.shape[:-1] + r.shape)
         Ez = solve_triangular(
-            _r,
-            q_inv @ jnp.expand_dims((X_centered * sqrt_noise_precision) @ scaled_W.mT, -1),
+            r,
+            q_inv @ ((X_centered * sqrt_noise_precision)[..., None, :] @ scaled_W.mT).mT,
         )
 
         Ez = Ez.squeeze(-1)
@@ -275,30 +274,54 @@ class BayesianFactorAnalysis(Model):
 class PPCA(BayesianFactorAnalysis):
     """Probabilistic Principal Component Analysis."""
 
-    def __init__(self, n_components: int, n_features: int, random_state: Optional[PRNGKey] = None):
+    def __init__(
+        self,
+        n_components: int,
+        n_features: int,
+        random_state: Optional[PRNGKey] = None,
+        data_mask: Optional[Array] = None,
+    ):
         """Initialize PPCA model.
 
         Args:
             n_components: Number of components
             n_features: Number of features
             random_state: Random state for initialization
+            data_mask: Optional boolean array indicating which features are observed (True) or missing (False)
+                      Shape should match input data (n_samples, n_features). If None, all features are observed.
         """
         super().__init__(
-            n_components=n_components, n_features=n_features, isotropic_noise=True, random_state=random_state
+            n_components=n_components,
+            n_features=n_features,
+            isotropic_noise=True,
+            random_state=random_state,
+            data_mask=data_mask,
         )
 
 
 class FactorAnalysis(BayesianFactorAnalysis):
     """Factor Analysis with per-feature noise."""
 
-    def __init__(self, n_components: int, n_features: int, random_state: Optional[PRNGKey] = None):
+    def __init__(
+        self,
+        n_components: int,
+        n_features: int,
+        random_state: Optional[PRNGKey] = None,
+        data_mask: Optional[Array] = None,
+    ):
         """Initialize Factor Analysis model.
 
         Args:
             n_components: Number of components
             n_features: Number of features
             random_state: Random state for initialization
+            data_mask: Optional boolean array indicating which features are observed (True) or missing (False)
+                      Shape should match input data (n_samples, n_features). If None, all features are observed.
         """
         super().__init__(
-            n_components=n_components, n_features=n_features, isotropic_noise=False, random_state=random_state
+            n_components=n_components,
+            n_features=n_features,
+            isotropic_noise=False,
+            random_state=random_state,
+            data_mask=data_mask,
         )
