@@ -1,6 +1,6 @@
 """Bayesian Factor Analysis implementation."""
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -23,10 +23,16 @@ class BayesianFactorAnalysis(Model):
     W_dist: MultivariateNormalGamma  # batched over features
     noise_precision: Gamma  # Single precision for PPCA or per-feature for FA
     mean_: Array  # Data mean for centering
+    data_mask: Optional[Array] = None  # Mask for missing data (True for observed, False for missing)
     random_state: Optional[PRNGKey] = None
 
     def __init__(
-        self, n_components: int, n_features: int, isotropic_noise: bool = False, random_state: Optional[PRNGKey] = None
+        self,
+        n_components: int,
+        n_features: int,
+        isotropic_noise: bool = False,
+        data_mask: Optional[Array] = None,
+        random_state: Optional[PRNGKey] = None,
     ):
         """Initialize BayesianFactorAnalysis model.
 
@@ -34,12 +40,15 @@ class BayesianFactorAnalysis(Model):
             n_components: Number of components
             n_features: Number of features
             isotropic_noise: If True, use same noise precision for all features (PPCA)
+            data_mask: Optional boolean array indicating which features are observed (True) or missing (False)
+                      Shape should match input data (n_samples, n_features). If None, all features are observed.
             random_state: Random state for initialization
         """
         self.n_components = n_components
         self.n_features = n_features
         self.isotropic_noise = isotropic_noise
         self.random_state = random_state
+        self.data_mask = data_mask
 
         # Initialize mean
         self.mean_ = jnp.zeros(n_features)
@@ -69,7 +78,24 @@ class BayesianFactorAnalysis(Model):
             # Per-feature precision (FA)
             self.noise_precision = Gamma(alpha0=2 * jnp.ones(self.n_features), beta0=jnp.ones(self.n_features))
 
-    def _e_step(self, X: Array) -> Tuple[Array, Array]:
+    def _validate_mask(self, X: Array) -> Array:
+        """Validate and process the data mask.
+
+        Args:
+            X: Data matrix of shape (n_samples, n_features)
+
+        Returns:
+            Validated mask of shape (n_samples, n_features)
+        """
+        if self.data_mask is None:
+            return jnp.ones_like(X, dtype=bool)
+
+        if self.data_mask.shape != X.shape:
+            raise ValueError(f"data_mask shape {self.data_mask.shape} does not match data shape {X.shape}")
+
+        return self.data_mask
+
+    def _e_step(self, X: Array) -> MultivariateNormal:
         """E-step: Compute expected latent variables.
 
         Args:
@@ -80,6 +106,7 @@ class BayesianFactorAnalysis(Model):
                 Ez: Expected factors E[z|x] of shape (n_samples, n_components)
                 Ezz: Expected factor outer products E[zz'|x] of shape (n_components, n_components)
         """
+        mask = self._validate_mask(X)
         X_centered = X - self.mean_
 
         # Get current loading matrix and noise precision
@@ -87,6 +114,9 @@ class BayesianFactorAnalysis(Model):
         sqrt_noise_precision = jnp.sqrt(self.noise_precision.mean)
         if self.isotropic_noise:
             sqrt_noise_precision = jnp.full(self.n_features, sqrt_noise_precision)
+
+        # Scale noise precision by mask
+        sqrt_noise_precision = jnp.where(mask, sqrt_noise_precision, 0.0)
 
         # Compute posterior parameters
         scaled_W = W * sqrt_noise_precision
@@ -108,6 +138,7 @@ class BayesianFactorAnalysis(Model):
         return qz
 
     def _m_step(self, X: Array, qz: MultivariateNormal) -> "BayesianFactorAnalysis":
+        mask = self._validate_mask(X)
         """M-step: Update parameters.
 
         Args:
@@ -117,8 +148,7 @@ class BayesianFactorAnalysis(Model):
         Returns:
             Updated model instance
         """
-        n_samples = X.shape[0]
-        X_centered = X - self.mean_
+        X_centered = jnp.where(mask, X - self.mean_, 0.0)
 
         exp_stats = qz.expected_sufficient_statistics
         Ez = exp_stats[..., : self.n_components]
@@ -130,12 +160,13 @@ class BayesianFactorAnalysis(Model):
         mvn = eqx.tree_at(lambda x: (x.nat1, x.nat2), self.W_dist.mvn, (nat1, -0.5 * P))
 
         # update noise precision
-        dnat1 = 0.5 * n_samples
-        dnat2 = -0.5 * (jnp.square(X_centered).sum(0) - jnp.sum(mvn.mean * nat1, -1))
+        n_observed = jnp.sum(mask, axis=0)
+        dnat1 = 0.5 * n_observed
+        dnat2 = -0.5 * (jnp.sum(jnp.square(X_centered), axis=0) - jnp.sum(mvn.mean * nat1, -1))
 
         if self.isotropic_noise:
             # Single precision for all features
-            dnat1 = dnat1 * self.n_features
+            dnat1 = jnp.sum(dnat1)
             dnat2 = jnp.sum(dnat2)
 
         gamma_np = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), self.noise_precision, (dnat1, dnat2))
@@ -165,7 +196,8 @@ class BayesianFactorAnalysis(Model):
             Fitted model instance
         """
         # Create new instance with updated mean
-        model = eqx.tree_at(lambda x: x.mean_, self, jnp.mean(X, axis=0))
+        mask = self._validate_mask(X)
+        model = eqx.tree_at(lambda x: x.mean_, self, jnp.sum(mask * X, axis=0) / jnp.sum(mask, axis=0))
 
         # EM algorithm
         old_ll = -jnp.inf
@@ -218,22 +250,24 @@ class BayesianFactorAnalysis(Model):
         Returns:
             ll: Log likelihood
         """
-        n_samples = X.shape[0]
-
         # Get current parameters
         W = self.W_dist.mean
         noise_precision = self.noise_precision.mean
         if self.isotropic_noise:
             noise_precision = jnp.full(self.n_features, noise_precision)
 
-        # Compute log likelihood
+        # Get mask and compute number of observed values
+        mask = self._validate_mask(X)
+        n_observed = jnp.sum(mask)
+
+        # Compute log likelihood for observed data only
         X_centered = X - self.mean_
         reconstruction = Ez @ W.mT
 
         # Data term
-        ll = -0.5 * n_samples * self.n_features * jnp.log(2 * jnp.pi)
-        ll += 0.5 * n_samples * jnp.sum(jnp.log(noise_precision))
-        ll -= 0.5 * jnp.sum(noise_precision * (X_centered - reconstruction) ** 2)
+        ll = -0.5 * n_observed * jnp.log(2 * jnp.pi)
+        ll += 0.5 * jnp.sum(mask * jnp.log(noise_precision))
+        ll -= 0.5 * jnp.sum(noise_precision * mask * (X_centered - reconstruction) ** 2)
 
         return ll
 
