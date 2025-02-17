@@ -186,7 +186,7 @@ class MultivariateNormal(ExponentialFamily):
         Returns:
             Natural parameters [η₁, vec(η₂)].
         """
-        return jnp.concatenate([self.nat1, self.nat2.reshape(*self.batch_shape, -1)], axis=-1)
+        return jnp.concatenate([self.nat1, -0.5 * self.precision.reshape(*self.batch_shape, -1)], axis=-1)
 
     @property
     def log_normalizer(self) -> Array:
@@ -199,7 +199,7 @@ class MultivariateNormal(ExponentialFamily):
         L, logdet = safe_cholesky_and_logdet(precision)
         m = self._apply_mask_vector(solve_triangular(L, self.nat1[..., None], lower=True)[..., 0])
 
-        return 0.25 * jnp.sum(jnp.square(m), -1) - 0.5 * logdet
+        return 0.5 * jnp.sum(jnp.square(m), -1) - 0.5 * logdet
 
     def log_base_measure(self, x: Array = None) -> Array:
         """Compute log of base measure h(x).
