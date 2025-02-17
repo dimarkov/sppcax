@@ -15,7 +15,7 @@ def default_ss(x: Array) -> Array:
 class Delta(Distribution):
     """Delta distribution (Dirac delta) concentrated at a single point."""
 
-    location: Array
+    mean: Array
     sufficient_statistics: Callable
 
     def __init__(
@@ -34,7 +34,7 @@ class Delta(Distribution):
         *batch_shape, event_dim = location.shape
         super().__init__(batch_shape=tuple(batch_shape), event_shape=(event_dim,))
 
-        self.location = location
+        self.mean = location
         self.sufficient_statistics = sufficient_statistics_fn if sufficient_statistics_fn is not None else default_ss
 
     def log_prob(self, x: Array) -> Array:
@@ -49,8 +49,13 @@ class Delta(Distribution):
             Returns 0 at location, -inf elsewhere.
         """
         # Check if x equals location across event dimensions
-        equal = jnp.all(x == self.location, axis=tuple(range(-len(self.event_shape), 0)))
+        equal = jnp.all(x == self.mean, axis=tuple(range(-len(self.event_shape), 0)))
         return jnp.where(equal, 0.0, -jnp.inf)
+
+    @property
+    def covariance(self) -> Array:
+        zeros = jnp.zeros(self.shape)
+        return zeros[..., None] * jnp.eye(zeros.shape[-1])
 
     def sample(self, key: PRNGKey, sample_shape: Shape = ()) -> Array:
         """Sample from the distribution (always returns location).
@@ -63,7 +68,7 @@ class Delta(Distribution):
             Samples with shape: sample_shape + batch_shape + event_shape
             All samples are equal to location.
         """
-        return jnp.broadcast_to(self.location, sample_shape + self.shape)
+        return jnp.broadcast_to(self.mean, sample_shape + self.shape)
 
     def entropy(self) -> Array:
         """Compute entropy (always 0 for delta distribution).
@@ -83,4 +88,4 @@ class Delta(Distribution):
         Returns:
             Expected sufficient statistics with shape determined by sufficient_statistics_fn.
         """
-        return self.sufficient_statistics(self.location)
+        return self.sufficient_statistics(self.mean)

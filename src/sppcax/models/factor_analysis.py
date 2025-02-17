@@ -260,16 +260,22 @@ class BayesianFactorAnalysis(Model):
         qz = self._e_step(X, use_data_mask=use_data_mask)
         return qz
 
-    def inverse_transform(self, Z: Array) -> Array:
-        """Transform data back to its original space.
+    def inverse_transform(self, Z: Union[Array, Distribution]) -> Array:
+        """Transform latent states back to its original space.
 
         Args:
-            Z: Data in transformed space of shape (n_samples, n_components)
+            Z: Data in transformed space of shape (n_samples, n_components) or a Distribution
 
         Returns:
             X_original: Data in original space of shape (n_samples, n_features)
         """
-        return Z @ self.W_dist.mean.T + self.mean_
+        Z_dist = _to_distribution(Z)
+        W = self.W_dist.mean.mT
+        loc = Z_dist.mean @ W + self.mean_
+        covariance = (1 / self.noise_precision.mean)[..., None] * jnp.eye(
+            self.n_features
+        ) + W.mT @ Z_dist.covariance @ W
+        return MultivariateNormal(loc=loc, covariance=covariance)
 
     def _expected_log_likelihood(self, X_dist: Distribution, qz: MultivariateNormal) -> Array:
         """Compute expected log likelihood E_q[log p(X|Z,W,τ)].
