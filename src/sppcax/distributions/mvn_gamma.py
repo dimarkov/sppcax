@@ -63,7 +63,7 @@ class MultivariateNormalGamma(ExponentialFamily):
         # Initialize Gamma parameters
         self.gamma = Gamma(alpha0=alpha * jnp.ones(self.mvn.event_shape), beta0=beta * jnp.ones(self.mvn.event_shape))
 
-        # Set shapes from MVN
+        # Set shapes from MVN-Gamma
         super().__init__(batch_shape=self.mvn.batch_shape, event_shape=self.mvn.event_shape)
 
     def log_prob(self, x: Tuple[Array, Array]) -> Array:
@@ -107,7 +107,7 @@ class MultivariateNormalGamma(ExponentialFamily):
         # Sample x|tau ~ MVN(μ, (τΛ)⁻¹)
         # We can sample from base MVN and scale by sqrt(tau)
         value = self.mvn.sample(key_mvn, sample_shape=sample_shape)
-        value = value / jnp.sqrt(tau)[..., None]
+        value = value / jnp.sqrt(tau)
 
         return value, tau
 
@@ -129,3 +129,34 @@ class MultivariateNormalGamma(ExponentialFamily):
     def expected_log_precision(self) -> Array:
         """Compute expected log precision E[log(τ)]."""
         return jsp.digamma(self.gamma.alpha) - jnp.log(self.gamma.beta)
+
+    @property
+    def kl_divergence_from_prior(self) -> Array:
+        """Compute KL divergence KL(post||prior).
+
+        Returns:
+            KL divergence KL(post||prior) with shape: batch_shape
+        """
+        kl_div_gamma = (self.gamma.kl_divergence_from_prior * self.mvn.mask).sum(-1)
+        exp_tau = self.gamma.mean
+
+        eta_self = self.mvn.natural_parameters
+        other = MultivariateNormal(loc=jnp.zeros_like(self.mvn.nat1), mask=self.mvn.mask)
+        eta_other = other.natural_parameters
+
+        E_x = self.mvn.mean
+        cov = self.mvn.covariance
+
+        mean_outer = (exp_tau * E_x)[..., None] * E_x[..., None, :]
+        E_xx = mean_outer + cov
+
+        expected_T = jnp.concatenate([exp_tau * E_x, E_xx.reshape(*E_x.shape[:-1], -1)], axis=-1)
+
+        # Sum over natural parameter dimensions
+        inner_product = jnp.sum(
+            (eta_self - eta_other) * expected_T, axis=tuple(range(-len(self.mvn.natural_param_shape), 0))
+        )
+
+        kl_div_mvn = -self.mvn.log_normalizer + other.log_normalizer + inner_product
+
+        return kl_div_gamma + kl_div_mvn
