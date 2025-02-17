@@ -172,3 +172,24 @@ class Gamma(ExponentialFamily):
         rate = -eta[..., 1]  # β = -η₂
 
         return cls(alpha0=shape, beta0=rate)
+
+    @property
+    def kl_divergence_from_prior(self) -> Array:
+        """Compute KL divergence KL(post||prior).
+
+        Returns:
+            KL divergence KL(post||prior) with shape: batch_shape
+        """
+        eta_self = self.natural_parameters
+        eta_other = jnp.stack([self.nat1_0, self.nat2_0], axis=-1)
+        alpha = eta_other[..., 0] + 1
+        beta = -eta_other[..., 1]
+        other_log_normalizer = jsp.gammaln(alpha) - alpha * jnp.log(beta)
+        expected_T = self.expected_sufficient_statistics
+
+        # Sum over natural parameter dimensions
+        inner_product = jnp.sum(
+            (eta_self - eta_other) * expected_T, axis=tuple(range(-len(self.natural_param_shape), 0))
+        )
+
+        return -self.log_normalizer + other_log_normalizer + inner_product
