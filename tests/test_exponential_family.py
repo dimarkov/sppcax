@@ -62,7 +62,7 @@ def test_gamma_distribution():
     # Test initialization with alpha/beta
     alpha = jnp.array([2.0, 3.0])
     beta = jnp.array([1.0, 2.0])
-    dist = Gamma(alpha=alpha, beta=beta)
+    dist = Gamma(alpha0=alpha, beta0=beta)
 
     # Test shapes
     assert dist.batch_shape == (2,)
@@ -126,8 +126,8 @@ def test_kl_divergence():
     # Test Gamma KL divergence
     alpha1, beta1 = jnp.array([2.0, 3.0]), jnp.array([1.0, 2.0])
     alpha2, beta2 = jnp.array([1.0, 2.0]), jnp.array([2.0, 1.0])
-    dist1 = Gamma(alpha=alpha1, beta=beta1)
-    dist2 = Gamma(alpha=alpha2, beta=beta2)
+    dist1 = Gamma(alpha0=alpha1, beta0=beta1)
+    dist2 = Gamma(alpha0=alpha2, beta0=beta2)
 
     kl = dist1.kl_divergence(dist2)
     assert kl.shape == dist1.batch_shape
@@ -411,7 +411,7 @@ def test_broadcasting():
     # Test Gamma broadcasting
     alpha = 2.0
     beta = jnp.array([1.0, 2.0])
-    dist = Gamma(alpha=alpha, beta=beta)
+    dist = Gamma(alpha0=alpha, beta0=beta)
     assert dist.batch_shape == (2,)
     assert jnp.allclose(dist.alpha, jnp.full(2, alpha))
 
