@@ -1,17 +1,33 @@
 """Bayesian Factor Analysis implementation."""
 
-from typing import Optional
+from typing import Optional, Union
 
 import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
 from jax.scipy.linalg import solve_triangular
 
+from ..distributions.base import Distribution
+from ..distributions.delta import Delta
 from ..distributions.gamma import Gamma
 from ..distributions.mvn import MultivariateNormal
 from ..distributions.mvn_gamma import MultivariateNormalGamma
 from ..types import Array, PRNGKey
 from .base import Model
+
+
+def _to_distribution(X: Union[Array, Distribution]) -> Distribution:
+    """Convert input to a Distribution if it isn't already.
+
+    Args:
+        X: Input data, either an Array or Distribution
+
+    Returns:
+        Distribution instance
+    """
+    if isinstance(X, Distribution):
+        return X
+    return Delta(X)
 
 
 class BayesianFactorAnalysis(Model):
@@ -64,7 +80,7 @@ class BayesianFactorAnalysis(Model):
 
         # Initialize loading matrix columns
         loc = jr.normal(key, (self.n_features, self.n_components)) * 0.01
-        mask = mask = jnp.clip(jnp.arange(self.n_features), a_max=self.n_components)[..., None] >= jnp.arange(
+        mask = mask = jnp.clip(jnp.arange(self.n_features), max=self.n_components)[..., None] >= jnp.arange(
             self.n_components
         )
         alpha = 2 + (self.n_features - jnp.arange(self.n_components)) / 2
@@ -95,11 +111,11 @@ class BayesianFactorAnalysis(Model):
 
         return self.data_mask
 
-    def _e_step(self, X: Array, use_data_mask: bool = True) -> MultivariateNormal:
+    def _e_step(self, X: Union[Array, Distribution], use_data_mask: bool = True) -> MultivariateNormal:
         """E-step: Compute expected latent variables.
 
         Args:
-            X: Data matrix of shape (n_samples, n_features)
+            X: Data matrix of shape (n_samples, n_features) or Distribution instance
             use_data_mask: apply data mask (default True)
 
         Returns:
@@ -107,8 +123,10 @@ class BayesianFactorAnalysis(Model):
                 Ez: Expected factors E[z|x] of shape (n_samples, n_components)
                 Ezz: Expected factor outer products E[zz'|x] of shape (n_components, n_components)
         """
-        mask = self._validate_mask(X) if use_data_mask else jnp.ones_like(X, dtype=bool)
-        X_centered = X - self.mean_
+        X_dist = _to_distribution(X)
+        X_mean = X_dist.mean if hasattr(X_dist, "mean") else X_dist.location
+        mask = self._validate_mask(X_mean) if use_data_mask else jnp.ones_like(X_mean, dtype=bool)
+        X_centered = X_mean - self.mean_
 
         # Get current loading matrix and noise precision
         W = self.W_dist.mean.mT  # (n_components, n_features)
@@ -121,7 +139,7 @@ class BayesianFactorAnalysis(Model):
 
         # Compute posterior parameters
         scaled_W = W * sqrt_noise_precision[..., None, :]
-        exp_cov = jnp.sum(self.W_dist.expected_covariance, 0)
+        exp_cov = jnp.sum(mask[..., None, None] * self.W_dist.expected_covariance, -3)
         P = exp_cov + scaled_W @ scaled_W.mT + jnp.eye(self.n_components)
         q, r = jnp.linalg.qr(P)
         q_inv = q.mT
@@ -137,18 +155,25 @@ class BayesianFactorAnalysis(Model):
 
         return qz
 
-    def _m_step(self, X: Array, qz: MultivariateNormal) -> "BayesianFactorAnalysis":
-        mask = self._validate_mask(X)
+    def _m_step(self, X: Union[Array, Distribution], qz: MultivariateNormal) -> "BayesianFactorAnalysis":
         """M-step: Update parameters.
 
         Args:
-            X: Data matrix of shape (n_samples, n_features)
+            X: Data matrix of shape (n_samples, n_features) or Distribution instance
             qz: Posterior estimates of latent states obtained during the variational e-step (n_samples, n_components)
 
         Returns:
             Updated model instance
         """
-        X_centered = jnp.where(mask, X - self.mean_, 0.0)
+        X_dist = _to_distribution(X)
+        exp_stats = X_dist.expected_sufficient_statistics
+
+        dim = X_dist.event_shape[0]
+        E_x = exp_stats[..., :dim]
+        E_xx = exp_stats[..., dim :: dim + 1]
+
+        mask = self._validate_mask(E_x)
+        X_centered = jnp.where(mask, E_x - self.mean_, 0.0)
 
         exp_stats = qz.expected_sufficient_statistics
         Ez = exp_stats[..., : self.n_components]
@@ -162,7 +187,7 @@ class BayesianFactorAnalysis(Model):
         # update noise precision
         n_observed = jnp.sum(mask, axis=0)
         dnat1 = 0.5 * n_observed
-        dnat2 = -0.5 * (jnp.sum(jnp.square(X_centered), axis=0) - jnp.sum(mvn.mean * nat1, -1))
+        dnat2 = -0.5 * (jnp.sum(E_xx, axis=0) - jnp.sum(mvn.mean * nat1, -1))
 
         if self.isotropic_noise:
             # Single precision for all features
@@ -184,45 +209,49 @@ class BayesianFactorAnalysis(Model):
 
         return model
 
-    def fit(self, X: Array, n_iter: int = 100, tol: float = 1e-6) -> "BayesianFactorAnalysis":
+    def fit(self, X: Union[Array, Distribution], n_iter: int = 100, tol: float = 1e-6) -> "BayesianFactorAnalysis":
         """Fit the model using EM algorithm.
 
         Args:
-            X: Training data of shape (n_samples, n_features)
+            X: Training data of shape (n_samples, n_features) or Distribution instance
             n_iter: Maximum number of iterations
             tol: Convergence tolerance
 
         Returns:
             Fitted model instance
         """
+        # Convert input to distribution if needed
+        X_dist = _to_distribution(X)
+        X_mean = X_dist.mean if hasattr(X_dist, "mean") else X_dist.location
+
         # Create new instance with updated mean
-        mask = self._validate_mask(X)
-        model = eqx.tree_at(lambda x: x.mean_, self, jnp.sum(mask * X, axis=0) / jnp.sum(mask, axis=0))
+        mask = self._validate_mask(X_mean)
+        model = eqx.tree_at(lambda x: x.mean_, self, jnp.sum(mask * X_mean, axis=0) / jnp.sum(mask, axis=0))
 
         # EM algorithm
-        old_ll = -jnp.inf
-        lls = []
+        old_elbo = -jnp.inf
+        elbos = []
         for _ in range(n_iter):
             # E-step
-            qz = model._e_step(X)
+            qz = model._e_step(X_dist)
+            elbo_val = model.elbo(X_dist, qz)
+            elbos.append(elbo_val)
 
             # M-step (returns updated model)
-            model = model._m_step(X, qz)
+            model = model._m_step(X_dist, qz)
 
             # Check convergence
-            ll = model.score(X, qz.mean)
-            lls.append(ll)
-            if jnp.abs(ll - old_ll) < tol:
+            if jnp.abs(elbo_val - old_elbo) < tol:
                 break
-            old_ll = ll
+            old_elbo = elbo_val
 
-        return model, lls
+        return model, elbos
 
-    def transform(self, X: Array, use_data_mask: bool = False) -> Array:
+    def transform(self, X: Union[Array, Distribution], use_data_mask: bool = False) -> Array:
         """Apply dimensionality reduction to X.
 
         Args:
-            X: Data matrix of shape (n_samples, n_features)
+            X: Data matrix of shape (n_samples, n_features) or Distribution instance
             use_data_mask: apply data mask (default False)
 
         Returns:
@@ -242,35 +271,105 @@ class BayesianFactorAnalysis(Model):
         """
         return Z @ self.W_dist.mean.T + self.mean_
 
-    def score(self, X: Array, Ez: Array) -> Array:
-        """Compute the log likelihood of X under the model.
+    def _expected_log_likelihood(self, X_dist: Distribution, qz: MultivariateNormal) -> Array:
+        """Compute expected log likelihood E_q[log p(X|Z,W,τ)].
 
         Args:
-            X: Data matrix of shape (n_samples, n_features)
+            X_dist: Distribution over observations
+            qz: Posterior distribution over latent variables
 
         Returns:
-            ll: Log likelihood
+            Expected log likelihood
         """
-        # Get current parameters
+        # Get parameters
         W = self.W_dist.mean
-        noise_precision = self.noise_precision.mean
+        exp_stats = self.noise_precision.expected_sufficient_statistics
+        exp_log_prec = exp_stats[..., 0]
+        exp_noise_precision = exp_stats[..., 1]
         if self.isotropic_noise:
-            noise_precision = jnp.full(self.n_features, noise_precision)
+            exp_noise_precision = jnp.full(self.n_features, exp_noise_precision)
 
-        # Get mask and compute number of observed values
-        mask = self._validate_mask(X)
+        # Get expected sufficient statistics
+        dim = X_dist.event_shape[0]
+        exp_stats = X_dist.expected_sufficient_statistics
+        E_x = exp_stats[..., :dim]
+        E_xx = exp_stats[..., dim :: dim + 1]
+
+        # Get mask
+        mask = self._validate_mask(E_x)
         n_observed = jnp.sum(mask)
 
-        # Compute log likelihood for observed data only
-        X_centered = X - self.mean_
-        reconstruction = Ez @ W.mT
+        # Get expectations for Z
+        Ez = qz.mean
+        Ezz = qz.covariance + Ez[..., None] * Ez[..., None, :]
 
-        # Data term
-        ll = -0.5 * n_observed * jnp.log(2 * jnp.pi)
-        ll += 0.5 * jnp.sum(mask * jnp.log(noise_precision))
-        ll -= 0.5 * jnp.sum(noise_precision * mask * (X_centered - reconstruction) ** 2)
+        # Compute expected log likelihood
+        exp_ll = -0.5 * n_observed * jnp.log(2 * jnp.pi)
+        exp_ll += 0.5 * jnp.sum(mask * exp_log_prec)
 
-        return ll
+        # E[(x - Wz)^T τ (x - Wz)]
+        x_centered = E_x - self.mean_
+        term1 = jnp.sum(exp_noise_precision * mask * E_xx)
+        term2 = -2 * jnp.sum(exp_noise_precision * mask * (x_centered * (W @ Ez[..., None]).squeeze(-1)))
+        term3 = jnp.trace((exp_noise_precision * mask)[..., None] * (W @ Ezz @ W.T), axis1=-1, axis2=-2).sum()
+
+        exp_cov = self.W_dist.expected_covariance
+        term4 = jnp.trace(mask[..., None, None] * (exp_cov @ jnp.expand_dims(Ezz, -3)), axis1=-1, axis2=-2).sum()
+
+        exp_ll -= 0.5 * (term1 + term2 + term3 + term4)
+
+        return exp_ll
+
+    def _kl_latent(self, qz: MultivariateNormal) -> Array:
+        """Compute KL(q(Z)||p(Z)).
+
+        Args:
+            qz: Posterior distribution over latent variables
+
+        Returns:
+            KL divergence
+        """
+        return qz.kl_divergence(
+            MultivariateNormal(loc=jnp.zeros_like(qz.mean), precision=jnp.eye(self.n_components))
+        ).sum()
+
+    def _kl_loading(self) -> Array:
+        """Compute KL(q(W)||p(W)).
+
+        Returns:
+            KL divergence
+        """
+        return self.W_dist.kl_divergence_from_prior.sum()
+
+    def _kl_noise(self) -> Array:
+        """Compute KL(q(τ)||p(τ)).
+
+        Returns:
+            KL divergence
+        """
+        return self.noise_precision.kl_divergence_from_prior.sum()
+
+    def elbo(self, X: Union[Array, Distribution], qz: MultivariateNormal) -> Array:
+        """Compute Evidence Lower Bound (ELBO).
+
+        Args:
+            X: Data matrix or distribution over observations
+            qz: Posterior distribution over latent variables
+
+        Returns:
+            ELBO value
+        """
+        X_dist = _to_distribution(X)
+
+        # Expected log likelihood
+        exp_ll = self._expected_log_likelihood(X_dist, qz)
+
+        # KL terms
+        kl_z = self._kl_latent(qz)
+        kl_w = self._kl_loading()
+        kl_tau = self._kl_noise()
+
+        return exp_ll - kl_z - kl_w - kl_tau
 
 
 class PPCA(BayesianFactorAnalysis):
