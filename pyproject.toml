@@ -13,15 +13,18 @@ version_scheme = "no-guess-dev"
 
 [tool.black]
 line-length = 120
-target-version = ["py311"]
+target-version = ["py312"]
 
 [tool.ruff]
 line-length = 120
 select = ["E", "F", "I"]
-target-version = "py311"
+target-version = "py312"
+
+[tool.ruff.lint.per-file-ignores]
+"delta_f.py" = ["F811"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_configs = true

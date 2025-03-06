@@ -42,6 +42,13 @@ class BayesianFactorAnalysis(Model):
     data_mask: Optional[Array] = None  # Mask for missing data (True for observed, False for missing)
     random_state: Optional[PRNGKey] = None
 
+    # Bayesian Model Reduction parameters
+    use_bmr: bool = False
+    bmr_threshold: float = 3.0
+    bmr_frequency: int = 1  # Apply BMR every N M-steps
+    _m_step_counter: int = 0
+    _initial_W_prior: Optional[MultivariateNormalGamma] = None
+
     def __init__(
         self,
         n_components: int,
@@ -85,6 +92,9 @@ class BayesianFactorAnalysis(Model):
         )
         alpha = 2 + (self.n_features - jnp.arange(self.n_components)) / 2
         self.W_dist = MultivariateNormalGamma(loc=loc, mask=mask, alpha=alpha, beta=1.0)
+
+        # Store initial W prior for BMR
+        self._initial_W_prior = self.W_dist.copy()
 
         # Initialize noise precision
         if self.isotropic_noise:
@@ -203,17 +213,47 @@ class BayesianFactorAnalysis(Model):
         new_W_dist = eqx.tree_at(lambda x: (x.mvn, x.gamma), self.W_dist, (mvn, gamma_tau))
 
         # Update model with new W distribution
-        model = eqx.tree_at(lambda x: (x.W_dist, x.noise_precision), self, (new_W_dist, gamma_np))
+        model = eqx.tree_at(
+            lambda x: (x.W_dist, x.noise_precision, x._m_step_counter),
+            self,
+            (new_W_dist, gamma_np, self._m_step_counter + 1),
+        )
+
+        # Apply Bayesian Model Reduction if enabled
+        if self.use_bmr and (self._m_step_counter % self.bmr_frequency == 0):
+            from ..bmr.model_reduction import reduce_model
+
+            # Get current posteriors for loading matrix
+            W_posterior = model.W_dist
+            W_prior = self._initial_W_prior
+
+            if W_prior is not None:
+                # Apply model reduction to find sparse loading matrix
+                updated_prior, _ = reduce_model(W_posterior, W_prior, threshold=self.bmr_threshold)
+
+                # Update model with reduced prior
+                model = eqx.tree_at(lambda x: x.W_dist, model, updated_prior)
 
         return model
 
-    def fit(self, X: Union[Array, Distribution], n_iter: int = 100, tol: float = 1e-6) -> "BayesianFactorAnalysis":
-        """Fit the model using EM algorithm.
+    def fit(
+        self,
+        X: Union[Array, Distribution],
+        n_iter: int = 100,
+        tol: float = 1e-6,
+        use_bmr: bool = False,
+        bmr_threshold: float = 3.0,
+        bmr_frequency: int = 1,
+    ) -> "BayesianFactorAnalysis":
+        """Fit the model using EM algorithm with optional Bayesian Model Reduction.
 
         Args:
             X: Training data of shape (n_samples, n_features) or Distribution instance
             n_iter: Maximum number of iterations
             tol: Convergence tolerance
+            use_bmr: Whether to use Bayesian Model Reduction to create a sparse loading matrix
+            bmr_threshold: Evidence threshold for pruning (higher values = more aggressive pruning)
+            bmr_frequency: Apply BMR every N M-steps
 
         Returns:
             model: Fitted model instance
@@ -223,9 +263,13 @@ class BayesianFactorAnalysis(Model):
         X_dist = _to_distribution(X)
         X_mean = X_dist.mean if hasattr(X_dist, "mean") else X_dist.location
 
-        # Create new instance with updated mean
+        # Create new instance with updated mean and BMR settings
         mask = self._validate_mask(X_mean)
-        model = eqx.tree_at(lambda x: x.mean_, self, jnp.sum(mask * X_mean, axis=0) / jnp.sum(mask, axis=0))
+        model = eqx.tree_at(
+            lambda x: (x.mean_, x.use_bmr, x.bmr_threshold, x.bmr_frequency, x._m_step_counter),
+            self,
+            (jnp.sum(mask * X_mean, axis=0) / jnp.sum(mask, axis=0), use_bmr, bmr_threshold, bmr_frequency, 0),
+        )
 
         # EM algorithm
         old_elbo = -jnp.inf
