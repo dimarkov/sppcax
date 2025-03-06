@@ -119,9 +119,7 @@ class BayesianFactorAnalysis(Model):
             use_data_mask: apply data mask (default True)
 
         Returns:
-            Tuple of:
-                Ez: Expected factors E[z|x] of shape (n_samples, n_components)
-                Ezz: Expected factor outer products E[zz'|x] of shape (n_components, n_components)
+            qz: Posterior distribution over latents z in the form of a MultivariateNormal distribution
         """
         X_dist = _to_distribution(X)
         X_mean = X_dist.mean if hasattr(X_dist, "mean") else X_dist.location
@@ -218,7 +216,8 @@ class BayesianFactorAnalysis(Model):
             tol: Convergence tolerance
 
         Returns:
-            Fitted model instance
+            model: Fitted model instance
+            elbos: a list of elbo values at each iteration step
         """
         # Convert input to distribution if needed
         X_dist = _to_distribution(X)
@@ -255,7 +254,7 @@ class BayesianFactorAnalysis(Model):
             use_data_mask: apply data mask (default False)
 
         Returns:
-            X_new: Transformed data of shape (n_samples, n_components)
+            qz: Posterior estimate of the latents as MultivariateNormal distribution
         """
         qz = self._e_step(X, use_data_mask=use_data_mask)
         return qz
@@ -267,7 +266,7 @@ class BayesianFactorAnalysis(Model):
             Z: Data in transformed space of shape (n_samples, n_components) or a Distribution
 
         Returns:
-            X_original: Data in original space of shape (n_samples, n_features)
+            X_original: Prediction of the data as a MultivariateNormal distribution
         """
         Z_dist = _to_distribution(Z)
         W = self.W_dist.mean.mT
