@@ -1,5 +1,4 @@
 """Functions for computing changes in variational free energy for different distributions."""
-# ruff: noqa: F811
 from typing import Any
 
 import jax.numpy as jnp
