@@ -5,12 +5,13 @@ from typing import Any
 import equinox as eqx
 from jax import lax
 from jax import numpy as jnp
+from jax import random as jr
 from multipledispatch import dispatch
 
-from ..distributions.mvn_gamma import MultivariateNormalGamma
-from ..models.factor_analysis_params import PFA
+from ..distributions import MultivariateNormalGamma
+from ..models import PFA
 from ..types import Array
-from .delta_f import compute_delta_f
+from .delta_f import gibbs_sampler
 
 
 @dispatch(PFA)
@@ -18,30 +19,28 @@ def reduce_model(model: PFA, max_iter: int = 4) -> PFA:
     """Reduce model by pruning parameters with insufficient evidence.
 
     Args:
-        posterior: Posterior distribution
-        prior: Prior distribution
-        threshold: Log evidence threshold for pruning (larger = more aggressive pruning)
-        indices: Optional list of parameter indices to consider for pruning
+        model: Probabilistic factor analysis model
+        max_iter: Maximal number of iterations for the Gibbs sampler
 
     Returns:
-        Tuple containing:
-        - Updated prior with pruned parameters
-        - Array of log evidence values for pruned vs. unpruned models
+        Pruned PFA model
     """
 
     def step_fn(carry, t):
-        delta_f, sparsity_post, lam = carry
+        delta_f, sparsity_post, lam, key = carry
 
         # Compute delta F and sparsity matrix lambda for each parameter
-        pi = sparsity_post.sample()
-        delta_f, lam = compute_delta_f(model, pi, lam, delta_f)
+        key, _key = jr.split(key)
+        pi = sparsity_post.sample(_key)
+        key, _key = jr.split(key)
+        delta_f, lam = gibbs_sampler(_key, model, pi, lam, delta_f)
 
-        sparsity_post = eqx.tree_at(lambda x: x.count, sparsity_post, lam.sum())
+        sparsity_post = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), sparsity_post, (lam.sum(), (1 - lam).sum()))
 
-        return (delta_f, sparsity_post, lam), delta_f
+        return (delta_f, sparsity_post, lam, key), delta_f
 
-    init = (jnp.zeros(PFA.n_features), PFA.sparsity_prior, PFA.W_dist.mvn.mask)
-    (last_df, sparsity_post, lam), delta_fs = lax.scan(step_fn, init, jnp.arange(max_iter))
+    init = (jnp.zeros(PFA.n_features), PFA.sparsity_prior, PFA.W_dist.mvn.mask, PFA.random_state)
+    (last_df, sparsity_post, lam, key), delta_fs = lax.scan(step_fn, init, jnp.arange(max_iter))
 
     # Update the model
     mvn_W = eqx.tree_at(lambda x: x.mask, model.W_dist.mvn, lam)  # update the mask of the loading matrix
@@ -49,7 +48,9 @@ def reduce_model(model: PFA, max_iter: int = 4) -> PFA:
     dnat2 = model.noise_precision.dnat2  # TODO: add correction to beta values
     noise_precision = eqx.tree_at(lambda x: x.dnat2, model.noise_precision, dnat2)
     model = eqx.tree_at(
-        lambda x: (x.W_dist, x.prior_sparsity, x.noise_precision), model, (W_dist, sparsity_post, noise_precision)
+        lambda x: (x.W_dist, x.sparsity_prior, x.noise_precision, x.random_state),
+        model,
+        (W_dist, sparsity_post, noise_precision, key),
     )
 
     return model
