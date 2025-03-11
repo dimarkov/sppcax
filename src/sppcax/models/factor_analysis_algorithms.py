@@ -120,7 +120,7 @@ def m_step(
     )
 
     # Apply Bayesian Model Reduction if enabled
-    if model.use_bmr and use_bmr:
+    if use_bmr:
         updated_model = reduce_model(updated_model)
 
     return updated_model
