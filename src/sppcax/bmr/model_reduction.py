@@ -1,19 +1,20 @@
 """Functions for Bayesian model reduction."""
 
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 import equinox as eqx
+from jax import lax
+from jax import numpy as jnp
 from multipledispatch import dispatch
 
-from ..distributions.base import Distribution
 from ..distributions.mvn_gamma import MultivariateNormalGamma
+from ..models.factor_analysis_params import PFA
 from ..types import Array
 from .delta_f import compute_delta_f
 
 
-def reduce_model(
-    posterior: Distribution, prior: Distribution, threshold: float = 3.0, indices: Optional[List[Tuple]] = None
-) -> Tuple[Distribution, Array]:
+@dispatch(PFA)
+def reduce_model(model: PFA, max_iter: int = 4) -> PFA:
     """Reduce model by pruning parameters with insufficient evidence.
 
     Args:
@@ -27,16 +28,31 @@ def reduce_model(
         - Updated prior with pruned parameters
         - Array of log evidence values for pruned vs. unpruned models
     """
-    # Compute delta F for each parameter
-    delta_f_values = compute_delta_f(posterior, prior, indices)
 
-    # Determine which parameters to prune based on threshold
-    pruning_mask = delta_f_values[:, 1] < threshold
+    def step_fn(carry, t):
+        delta_f, sparsity_post, lam = carry
 
-    # Create updated prior with pruned parameters
-    updated_prior = _apply_pruning(prior, delta_f_values[pruning_mask, 0].astype(int))
+        # Compute delta F and sparsity matrix lambda for each parameter
+        pi = sparsity_post.sample()
+        delta_f, lam = compute_delta_f(model, pi, lam, delta_f)
 
-    return updated_prior, delta_f_values
+        sparsity_post = eqx.tree_at(lambda x: x.count, sparsity_post, lam.sum())
+
+        return (delta_f, sparsity_post, lam), delta_f
+
+    init = (jnp.zeros(PFA.n_features), PFA.sparsity_prior, PFA.W_dist.mvn.mask)
+    (last_df, sparsity_post, lam), delta_fs = lax.scan(step_fn, init, jnp.arange(max_iter))
+
+    # Update the model
+    mvn_W = eqx.tree_at(lambda x: x.mask, model.W_dist.mvn, lam)  # update the mask of the loading matrix
+    W_dist = eqx.tree_at(lambda x: x.mvn, model.W_dist, mvn_W)
+    dnat2 = model.noise_precision.dnat2  # TODO: add correction to beta values
+    noise_precision = eqx.tree_at(lambda x: x.dnat2, model.noise_precision, dnat2)
+    model = eqx.tree_at(
+        lambda x: (x.W_dist, x.prior_sparsity, x.noise_precision), model, (W_dist, sparsity_post, noise_precision)
+    )
+
+    return model
 
 
 @dispatch(object, object)
