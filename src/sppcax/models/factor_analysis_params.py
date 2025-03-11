@@ -6,9 +6,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
 
-from ..distributions.base import Distribution
-from ..distributions.delta import Delta
-from ..distributions.gamma import Gamma
+from ..distributions import Beta, Delta, Distribution, Gamma
 from ..distributions.mvn_gamma import MultivariateNormalGamma
 from ..types import Array, PRNGKey
 
@@ -35,6 +33,7 @@ class BayesianFactorAnalysisParams(eqx.Module):
     isotropic_noise: bool
     W_dist: MultivariateNormalGamma  # batched over features
     noise_precision: Gamma  # Single precision for PPCA or per-feature for FA
+    sparsity_prior: Beta  # Prior over sparsity probaility
     mean_: Array  # Data mean for centering
     data_mask: Optional[Array] = None  # Mask for missing data (True for observed, False for missing)
     random_state: Optional[PRNGKey] = None
@@ -80,6 +79,8 @@ class BayesianFactorAnalysisParams(eqx.Module):
         mask = jnp.clip(jnp.arange(self.n_features), max=self.n_components)[..., None] >= jnp.arange(self.n_components)
         alpha = 2 + (self.n_features - jnp.arange(self.n_components)) / 2
         self.W_dist = MultivariateNormalGamma(loc=loc, mask=mask, alpha=alpha, beta=1.0)
+
+        self.sparsity_prior = Beta(alpha0=1.0, beta0=1.0)
 
         # Initialize noise precision
         if self.isotropic_noise:
