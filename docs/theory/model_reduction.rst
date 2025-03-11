@@ -171,7 +171,7 @@ of all other elements, obtained in the previous iteration step :math:`\Lambda_k^
 Hence,
 
 .. math::
-   \pmb{\lambda}_k \sim \prod_d q(\lambda_{dk}) = \prod_d \mathcal{Be}\left(\sigma\left(\Delta F_{d}\left[\Lambda_k^{(t-1)}\right] + \ln \frac{\pi_{t-1}}{1-\pi_{t-1}}\right)\right)
+   \pmb{\lambda}_k \sim \prod_d q(\lambda_{dk}) = \prod_d \mathcal{Be}\left(\sigma\left(-\Delta F_{d}\left[\Lambda_k^{(t-1)}\right] + \ln \frac{\pi_{t-1}}{1-\pi_{t-1}}\right)\right)
 
 where :math:`\mathcal{Be}(\cdot)` denotes Bernoulli distribution, :math:`\sigma(\cdot)` logistic function, and
 :math:`\Delta F_{d}\left[\Lambda_k^{(t-1)}\right]` corresponds to the d-th component of the change in variational free energy between
@@ -182,7 +182,7 @@ we are saying that the posterior probability of :math:`q(\lambda_{dk}=1)` corres
    q(\lambda_{dk}=1) &= \frac{p(\pmb{y}|m_{i-1})\pi}{p(\pmb{y}|m_{i-1}) \pi + p(\pmb{y}|m_{i}) (1 - \pi)} \\
    &\approx \frac{e^{-F(m_{i - 1}) + \ln \pi }}{e^{-F(m_{i - 1}) + \ln \pi } + e^{-F(m_{i}) + \ln (1 - \pi) }} \\
    &= \frac{1}{1 + e^{-F(m_{i}) + F(m_{i-1}) + \ln (1 - \pi) - \ln \pi }}  \\
-   &= \frac{1}{1 + e^{ - \Delta F_{d, i:i-1} - \ln \frac{\pi}{1-\pi}}}
+   &= \frac{1}{1 + e^{\Delta F_{d, i:i-1} - \ln \frac{\pi}{1-\pi}}}
 
 Simimilarly, we can generate posterior samples for :math:`q(\pi)` and infer the effective level of sparisty in
 the loading matrix by sampling :math:`\pi_t \sim q_t(\pi) = \text{Beta}(a_t, b_t)` where
