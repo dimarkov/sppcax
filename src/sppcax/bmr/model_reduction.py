@@ -9,7 +9,7 @@ from jax import random as jr
 from multipledispatch import dispatch
 
 from ..distributions import MultivariateNormalGamma
-from ..models import PFA
+from ..models.factor_analysis_params import PFA
 from ..types import Array
 from .delta_f import gibbs_sampler
 
