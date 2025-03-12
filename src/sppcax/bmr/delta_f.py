@@ -4,10 +4,9 @@ import jax.numpy as jnp
 from jax import lax, nn, vmap
 from jax import random as jr
 from jax.scipy.special import gammaln
-from multipledispatch import dispatch
 
 from ..models.factor_analysis_params import PFA
-from ..types import Array, PRNGKey
+from ..types import Array, Matrix, PRNGKey, Scalar, Tuple, Vector
 
 
 def ln_c(alpha: Array, beta: Array):
@@ -27,8 +26,7 @@ def compute_delta_f(lam_d, lm_mean_d, lm_prec_d, alpha_d, beta_d, ln_c_k) -> Arr
     return delta_f
 
 
-@dispatch(PFA, float, Array, Array)
-def gibbs_sampler(key: PRNGKey, model: PFA, pi: float, lam: Array, delta_f: Array) -> Array:
+def gibbs_sampler_pfa(key: PRNGKey, model: PFA, pi: Scalar, lam: Matrix, delta_f: Vector) -> Tuple[Vector, Matrix]:
     """Sample sparsity matrix lambda based on the local change in the variational free energy.
 
     For each element in the loading matrix, calculates the change in free energy that would result
@@ -77,6 +75,6 @@ def gibbs_sampler(key: PRNGKey, model: PFA, pi: float, lam: Array, delta_f: Arra
         return (lam, delta_f, key), None
 
     init = (lam, delta_f, key)
-    (new_lam, new_delta_f, _), _ = lax.step(step_fn, init, jnp.arange(K))
+    (new_lam, new_delta_f, _), _ = lax.scan(step_fn, init, jnp.arange(K))
 
     return new_delta_f, new_lam

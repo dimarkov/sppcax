@@ -11,7 +11,7 @@ from multipledispatch import dispatch
 from ..distributions import MultivariateNormalGamma
 from ..models.factor_analysis_params import PFA
 from ..types import Array
-from .delta_f import gibbs_sampler
+from .delta_f import gibbs_sampler_pfa
 
 
 @dispatch(PFA)
@@ -33,13 +33,15 @@ def reduce_model(model: PFA, max_iter: int = 4) -> PFA:
         key, _key = jr.split(key)
         pi = sparsity_post.sample(_key)
         key, _key = jr.split(key)
-        delta_f, lam = gibbs_sampler(_key, model, pi, lam, delta_f)
+        delta_f, lam = gibbs_sampler_pfa(_key, model, pi, lam, delta_f)
 
-        sparsity_post = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), sparsity_post, (lam.sum(), (1 - lam).sum()))
+        dnat1 = lam.sum() * jnp.ones(())
+        dnat2 = (1 - lam).sum() * jnp.ones(())
+        sparsity_post = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), sparsity_post, (dnat1, dnat2))
 
         return (delta_f, sparsity_post, lam, key), delta_f
 
-    init = (jnp.zeros(PFA.n_features), PFA.sparsity_prior, PFA.W_dist.mvn.mask, PFA.random_state)
+    init = (jnp.zeros(model.n_features), model.sparsity_prior, model.W_dist.mvn.mask, model.random_state)
     (last_df, sparsity_post, lam, key), delta_fs = lax.scan(step_fn, init, jnp.arange(max_iter))
 
     # Update the model
