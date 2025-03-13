@@ -80,6 +80,9 @@ Latent Variables
 
    p(\mathbf{z}_n) = \mathcal{N}(\mathbf{z}_n | \mathbf{0}, \mathbf{I})
 
+
+.. _sec-load-mat:
+
 Loading Matrix
 --------------
 
@@ -208,9 +211,11 @@ For the PFA variant (diagonal noise):
 
 .. math::
 
-   \alpha^\psi_d &= \alpha^\psi_0 + \frac{N + min(d, K)}{2} \\
-   \beta^\psi_d &= \beta^\psi_0 + \frac{1}{2}\sum_n \left[(x_{n,d}^c - \pmb{\mu}_d^T \pmb{\mu}_n)^2
-   + \pmb{\mu}_d^T \pmb{\Sigma}_n \pmb{\mu}_d\right] + \frac{N}{2}[\sigma^2_m]_{d} + \frac{1}{2}\sum_{k=1}^d \bar{\tau}_k (\sigma_{dk}^2 + \mu_{dk}^2)
+   \alpha^\psi_d &= \alpha^\psi_0 + \delta \alpha_d^\psi \\
+   \delta \alpha_d^\psi &= \frac{N + \min(d, K)}{2} \\
+   \beta^\psi_d &= \beta^\psi_0 + \delta \beta^\psi_d \\
+   \delta \beta^\psi_d &= \frac{1}{2}\sum_n \left[(x_{n,d} - m_d - \pmb{\mu}_d^T \pmb{\mu}_n)^2 + \pmb{\mu}_d \pmb{\Sigma}_n \pmb{\mu}_d^T\right] \\
+   &+ \frac{N}{2}[\sigma^2_m]_{d} + \frac{1}{2}\sum_{k=1}^{\min(d, K)} \bar{\tau}_k (\sigma_{dk}^2 + \mu_{dk}^2)
 
 The PPCA variant is then obtained as :math:`\alpha^{\psi} = \alpha_0^{\psi} + \sum_d \delta \alpha_d^\psi`, and
 :math:`\beta^\psi=\beta_0^\psi + \sum_d \delta \beta_d^{\psi}`.

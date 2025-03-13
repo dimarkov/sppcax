@@ -92,63 +92,61 @@ Bayesian Model Reduction for Factor Analysis
 
 In the context of Bayesian Factor Analysis, we use BMR to prune unnecessary elements of the loading matrix :math:`\mathbf{W}`. This is achieved by setting the prior precision of selected elements to infinity, effectively forcing those elements to zero.
 
-The reduced model differs from the full model only in the priors for specific elements of the loading matrix. The loading matrix elements are governed by a Normal-Gamma prior:
+The reduced model differs from the full model only in the priors for specific elements of the loading matrix. The loading matrix elements are governed by a Normal-Gamma prior, as
+specified in :ref:`sec-load-mat`. We will express the reduced prior of model :math:`m_i` (a prior in which additional elements of the loading
+matrix are fixed to zero) as:
 
 .. math::
 
-   p(\pmb{w}_{d}|\rho_d, \pmb{\tau}, m_i) &= \mathcal{N}(\pmb{\bar{w}}_{di}|0, \rho_d^{-1}\text{diag}(\pmb{\bar{\tau}}^{-1}_i)) \prod_{k \in \mathcal{R}_{di}}\delta(w_{dk}) \\
-   &= \mathcal{N}(\pmb{\bar{w}}_{di}|0, \rho_d^{-1}\text{diag}(\pmb{\bar{\tau}}^{-1}_i)) \delta(\pmb{\tilde{w}}_{di}) \\
-   p(\tau_{k}) &= \text{Gamma}(\tau_{k}|\alpha_0, \beta_0) \\
-   p(\rho_d) &= \text{Gamma}(\rho_{d}|\alpha^\prime_0, \beta^\prime_0)
+   p_i(\pmb{W}| \pmb{\tau}, \pmb{\psi}) &=  \prod_{k=1}^K \delta(\pmb{\tilde{w}}_k^i) \left(\frac{\tau_k}{2 \pi} \right)^{\frac{D - k - r_k^i + 1}{2}}
+   \sqrt{|\pmb{\Psi}_k^i|} \exp\left(-\frac{\tau_k}{2} \pmb{\bar{w}}_{k, i}^T \pmb{\Psi}_k^i \pmb{\bar{w}}_{k, i}\right)\\
 
-In the reduced model :math:`m_i`, an element :math:`w_{dk}` is pruned if :math:`\mathcal{R}_{di}` set, contains kth element, in which case
-the prior of :math:`w_{dk}` corresponds to the delta distribution.
+where :math:`\pmb{\bar{w}}_k^i` denotes a vector of the remaining (non-zero) elements of the kth column, :math:`\pmb{\tilde{w}}_k^i` denotes a vector
+pruned elements, :math:`r_k^i` is the number of pruned elements in kth column, and :math:`\pmb{\Psi}_k^i` is a diagonal matrix containing the remaining
+elements of the noise precision matrix.
 
 Given that the approximate posterior :math:`q_0(\pmb{\theta})` is specified as (see :ref:`sec-post-dist`)
 
 .. math::
-   q_0(\pmb{\theta}) = \prod_k \text{Gamma}(\tau_k|\alpha_k, \beta_k)\prod_d \text{Gamma}(\rho_d|\alpha^\prime_d, \beta^\prime_d) \mathcal{N}(\pmb{w}_d; \pmb{\mu}_d, \rho_d^{-1} \pmb{\Sigma}_d)
+   q_0(\pmb{\theta}) = \prod_k \text{Gamma}(\tau_k|\alpha^\tau_k, \beta^\tau_k)\prod_d \text{Gamma}(\psi_d|\alpha^\psi_d, \beta^\psi_d) \mathcal{N}(\pmb{w}_d; \pmb{\mu}_d, \psi_d^{-1} \pmb{\Sigma}_d)
 
-we can express the change in expected free energy :math:`\Delta F` as
+(where we ignore :math:`q(\pmb{\mu})` as it plays no role in pruning) we can express the change in expected free energy :math:`\Delta F` as
 
 .. math::
-   \Delta F_i &= \ln \prod_{k} \int d \tau_k ~q_0(\tau_k) \prod_d \int d \rho_d ~q_0(\rho_d) \int d \pmb{\tilde{w}}_{di} ~q_0 (\pmb{\tilde{w}}_{di}|\rho_d) \frac{\delta(\pmb{\tilde{w}}_{di})}{\mathcal{N}(\pmb{\tilde{w}}_{di}|0, \rho_d^{-1}\text{diag}(\pmb{\tilde{\tau}}^{-1}_i))} \\
-   & = \ln \prod_{k} \int d \tau_k ~q_0(\tau_k) \prod_d \int d \rho_d ~q_0(\rho_d) \frac{q_0 (\pmb{\tilde{w}}_{di} = 0|\rho_d)}{\mathcal{N}(\pmb{\tilde{w}}_{di} = 0|0, \rho_d^{-1}\text{diag}(\pmb{\tilde{\tau}}^{-1}_i))}
+   \Delta F_i &= \ln \int d \pmb{\tau}~q_0(\pmb{\tau}) \int d \pmb{\psi} ~q_0(\pmb{\psi})
+   \int d \pmb{\pmb{W}}~q_0 (\pmb{W}| \pmb{\psi}) \prod_{k=1}^K \delta(\pmb{\tilde{w}}_{k}^i)
+   \left( \frac{\tau_k}{2 \pi}\right)^{-r_k^i/2} |\pmb{\tilde{\Psi}}_k^i|^{-1/2} \\
+   & = \ln \int d \pmb{\tau}~q_0(\pmb{\tau}) \int d \pmb{\psi} ~q_0(\pmb{\psi})
+   \prod_{d=1}^D |\pmb{\tilde{\Sigma}}_d^i|^{-1/2}
+   \exp \left( - \frac{1}{2} [\pmb{\tilde{\mu}}_d^i]^T \pmb{\tilde{P}}_d^i \pmb{\tilde{\mu}}_d^i  \right)
+   \prod_{k=1}^K \tau_k^{- r_k^i / 2}
 
 where we use tilde sign to denote a vector subset corresponding to pruned elements (of the d-th component) in the reduced model :math:`m_i` relative to the full model :math:`m_0`.
 
 Computing :math:`\Delta F`
 ==========================
-We will split the computation of :math:`\Delta F_i` into several components. First, note that we can write the ratio
-of two multivariate normal distributions as
+We will split the computation of :math:`\Delta F_i` into several components. First, we will use the follwing relation for
+the expectation over the inverse square root of :math:`\tau_k`
 
 .. math::
-   \frac{q_0 (\pmb{\tilde{w}}_{di} = 0|\rho_d)}{\mathcal{N}(\pmb{\tilde{w}}_{di} = 0|0, \rho_d^{-1}\text{diag}(\pmb{\tilde{\tau}}^{-1}_i))}
-   = \frac{1}{\sqrt{|\pmb{\tilde{\Sigma}}_{di}|\prod_{k \in \mathcal{R}_{di}} \tau_k}} \exp \left\{ -\frac{\rho_d}{2} \pmb{\tilde{\mu}}_{di}^T \pmb{\tilde{\Sigma}}_{di}^{-1}\pmb{\tilde{\mu}}_{di} \right\}
+   c_k^i = \int d \tau_k q_0(\tau_k) \tau_k^{- r_k^i / 2} =
+   [\beta_k^\tau]^{- r_k^i / 2} \frac{\Gamma(\alpha_k^\tau - r_k^i/2)}{\Gamma(\alpha_k^\tau)}
 
-Second, we will use the follwing relation for the expectation over the inverse square root of :math:`\tau_k`
+We will use :math:`C_{i} = \prod_{k} c_k^i` to denote the product of corresponding factors.
 
-.. math::
-   c_k = \int d \tau_k q_0(\tau_k) / \sqrt{\tau_k} =
-   \sqrt{\beta_k} \frac{\Gamma(\alpha_k - 1/2)}{\Gamma(\alpha_k)} =
-   \binom{\alpha_k - 3/2}{\alpha_k - 1}\sqrt{\pi \beta_k}
-
-where we used the following property of the gamma function :math:`\Gamma(n + 1/2) = \binom{n - 1/2}{n}n! \sqrt{\pi}`.
-We will use :math:`C_{di} = \prod_{k \in \mathcal{R}_{di}} c_k` to denote the product of corresponding factors.
-
-Finally, the expectation over :math:`\rho_d` results in the following expression for :math:`\Delta F_i`
+The expectation over :math:`\pmb{\psi}` results in the following expression for :math:`\Delta F_i`
 
 .. math::
-   \Delta F_i &= \sum_d \ln \int d \rho_d q_0(\rho_d) \frac{C_{di}}{\sqrt{|\pmb{\tilde{\Sigma}}_{di}|}} \exp \left\{ -\frac{\rho_d}{2} \pmb{\tilde{\mu}}_{di}^T \pmb{\tilde{\Sigma}}_{di}^{-1}\pmb{\tilde{\mu}}_{di} \right\} \\
-   &= \sum_d \ln \frac{C_{di}}{\sqrt{|\pmb{\tilde{\Sigma}}_{di}|}}
-   \left(\frac{\beta_d^\prime}{\beta_d^\prime + \frac{1}{2} \cdot \pmb{\tilde{\mu}}_{di}^T \pmb{\tilde{\Sigma}}_{di}^{-1} \pmb{\tilde{\mu}}_{di}}\right)^{\alpha_d^\prime}
+   \Delta F_i &= \ln C_i + \sum_d \ln \int d \psi_d q_0(\psi_d) \frac{1}{\sqrt{|\pmb{\tilde{\Sigma}}_{d}^i|}} \exp \left\{ -\frac{\rho_d}{2} \pmb{\tilde{\mu}}_{di}^T \pmb{\tilde{\Sigma}}_{di}^{-1}\pmb{\tilde{\mu}}_{di} \right\} \\
+   &= \ln C_i + \sum_d \ln \frac{1}{\sqrt{|\pmb{\tilde{\Sigma}}_{di}|}}
+   \left(\frac{\beta_d^\psi}{\beta_d^\psi + \frac{1}{2} \cdot \pmb{\tilde{\mu}}_{di}^T \pmb{\tilde{\Sigma}}_{di}^{-1} \pmb{\tilde{\mu}}_{di}}\right)^{\alpha_d^\psi}
 
 Similarly, the change in variational free energy of going from model :math:`m_{i-1}` to model :math:`m_i`, which only differ in
-a single element of the loading matrix (e.g. at the position :math:`d^*, k^*`) is obtained as
+a single element of the loading matrix (e.g. at the position :math:`d, k^*`) is obtained as
 
 .. math::
    \Delta F_{i:i-1} &= \Delta F_{i} - \Delta F_{i-1} \\
-   &= \ln c_{k^*} - \frac{1}{2}\ln \sigma_{d^*,k^*}^2 - \alpha_d^\prime \ln \left( \frac{\beta_d^\prime + \frac{1}{2}[\pmb{\tilde{\mu}}_d^T \pmb{\tilde{\Sigma}}_d^{-1} \pmb{\tilde{\mu}}_d]_i}{\beta_d^\prime + \frac{1}{2}[\pmb{\tilde{\mu}}_d^T \pmb{\tilde{\Sigma}}_d^{-1} \pmb{\tilde{\mu}}_d]_{i-1}}\right)
+   &= \ln \frac{c_{k^*}^i}{c_{k^*}^{i-1}} - \frac{1}{2}\ln \sigma_{d,k^*}^2 - \alpha_d^\psi \ln \left( \frac{\beta_d^\psi + \frac{1}{2}[\pmb{\tilde{\mu}}_d^T \pmb{\tilde{\Sigma}}_d^{-1} \pmb{\tilde{\mu}}_d]_i}{\beta_d^\psi + \frac{1}{2}[\pmb{\tilde{\mu}}_d^T \pmb{\tilde{\Sigma}}_d^{-1} \pmb{\tilde{\mu}}_d]_{i-1}}\right)
 
 
 Gibbs sampling
@@ -207,10 +205,10 @@ If we assume for simplicity that the final sparse structure matrix :math:`\Lambd
 then the updated posterior is obtained as follows:
 
    1. :math:`q_i(\pmb{W})`  is obtained from :math:`q_0(\pmb{W})` by forcing mean and variance of corresponding elements of the loading matrix to zero.
-   2. :math:`q_i(\pmb{\rho})` is obtained using following parameter updates:
+   2. :math:`q_i(\pmb{\psi})` is obtained using following parameter updates:
        .. math::
-         \alpha_{d,i}^\prime &= \alpha_d^\prime \\
-         \beta_{d, i}^\prime &= \beta_d^\prime + \frac{1}{2} \cdot \pmb{\tilde{\mu}}_{di}^T \pmb{\tilde{\Sigma}}_{di}^{-1} \pmb{\tilde{\mu}}_{di}
+         \alpha_{d,i}^\psi &= \alpha_d^\psi \\
+         \beta_{d, i}^\psi &= \beta_d^\psi + \frac{1}{2} \cdot \pmb{\tilde{\mu}}_{di}^T \pmb{\tilde{\Sigma}}_{di}^{-1} \pmb{\tilde{\mu}}_{di}
 
    3.  :math:`q_i(\pmb{\tau})` remains unchanged, hence :math:`q_i(\pmb{\tau}) = q_0(\pmb{\tau})`.
 References
