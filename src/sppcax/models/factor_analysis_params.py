@@ -79,8 +79,9 @@ class BayesianFactorAnalysisParams(eqx.Module):
         mask = jnp.clip(jnp.arange(self.n_features), max=self.n_components)[..., None] >= jnp.arange(self.n_components)
 
         # set initial alpha to the value of the posterior
-        alpha = 2 + (self.n_features - jnp.arange(self.n_components)) / 2
-        self.W_dist = MultivariateNormalGamma(loc=loc, mask=mask, alpha=alpha, beta=1.0)
+        alpha = 1
+        beta = 1
+        self.W_dist = MultivariateNormalGamma(loc=loc, mask=mask, alpha=alpha, beta=beta)
 
         self.sparsity_prior = Beta(alpha0=1.0, beta0=1.0)
 

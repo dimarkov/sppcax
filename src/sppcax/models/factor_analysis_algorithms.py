@@ -85,6 +85,7 @@ def m_step(
     exp_stats = qz.expected_sufficient_statistics
     Ez = exp_stats[..., : model.n_components]
     Ezz = jnp.sum(exp_stats[..., model.n_components :], 0).reshape(model.n_components, model.n_components)
+    cov_z = Ezz - jnp.sum(Ez[..., None] * Ez[..., None, :], 0)
 
     # Update loading matrix
     tau = model.W_dist.gamma.mean
@@ -98,9 +99,7 @@ def m_step(
     n_observed = jnp.sum(mask, axis=0)
     dnat1 = 0.5 * (n_observed + jnp.minimum(jnp.arange(model.n_features) + 1, model.n_components))
 
-    dnat2 = -0.5 * (
-        jnp.square(X_centered).sum(0) - 2 * jnp.sum((Ez @ W.mT) * X_centered, 0) + jnp.sum((W @ Ezz) * W, -1)
-    )
+    dnat2 = -0.5 * (jnp.square(X_centered - Ez @ W.mT).sum(0) + jnp.sum((W @ cov_z) * W, -1))
     dnat2 -= 0.5 * (sigma_sqr_w + jnp.square(W)) @ tau
 
     if model.isotropic_noise:
@@ -111,10 +110,11 @@ def m_step(
     gamma_np = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), model.noise_precision, (dnat1, dnat2))
 
     # update tau
+    dnat1 = (model.n_features - jnp.arange(model.n_components)) / 2
     dnat2 = -0.5 * jnp.sum(sigma_sqr_w + gamma_np.mean[..., None] * jnp.square(W), 0)
 
     # Create new W distribution
-    gamma_tau = eqx.tree_at(lambda x: x.dnat2, model.W_dist.gamma, dnat2)
+    gamma_tau = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), model.W_dist.gamma, (dnat1, dnat2))
     new_W_dist = eqx.tree_at(lambda x: (x.mvn, x.gamma), model.W_dist, (mvn, gamma_tau))
 
     # Update model with posterior distributions
