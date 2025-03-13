@@ -6,6 +6,8 @@ import equinox as eqx
 import jax.numpy as jnp
 from jax.scipy.linalg import solve_triangular
 
+from sppcax.distributions.utils import safe_cholesky_and_logdet
+
 from ..bmr import reduce_model
 from ..distributions.base import Distribution
 from ..distributions.mvn import MultivariateNormal
@@ -42,8 +44,8 @@ def e_step(
 
     # Compute posterior parameters
     scaled_W = W * sqrt_noise_precision[..., None, :]
-    exp_cov = jnp.sum(mask[..., None, None] * model.W_dist.expected_covariance, -3)
-    P = exp_cov + scaled_W @ scaled_W.mT + jnp.eye(model.n_components)
+    masked_cov = jnp.sum(mask[..., None, None] * model.W_dist.mvn.covariance, -3)
+    P = masked_cov + scaled_W @ scaled_W.mT + jnp.eye(model.n_components)
     q, r = jnp.linalg.qr(P)
     q_inv = q.mT
 
@@ -62,7 +64,7 @@ def e_step(
 def m_step(
     model: BayesianFactorAnalysisParams, X: Union[Array, Distribution], qz: MultivariateNormal, use_bmr: bool = False
 ) -> BayesianFactorAnalysisParams:
-    """M-step: Update parameters.
+    """VBM-step: Update parameters.
 
     Args:
         model: BayesianFactorAnalysis model parameters
@@ -74,11 +76,8 @@ def m_step(
         Updated model instance
     """
     X_dist = _to_distribution(X)
-    exp_stats = X_dist.expected_sufficient_statistics
 
-    dim = X_dist.event_shape[0]
-    E_x = exp_stats[..., :dim]
-    E_xx = exp_stats[..., dim :: dim + 1]
+    E_x = X_dist.mean if hasattr(X_dist, "mean") else X_dist.location
 
     mask = model._validate_mask(E_x)
     X_centered = jnp.where(mask, E_x - model.mean_, 0.0)
@@ -88,14 +87,21 @@ def m_step(
     Ezz = jnp.sum(exp_stats[..., model.n_components :], 0).reshape(model.n_components, model.n_components)
 
     # Update loading matrix
-    P = jnp.diag(model.W_dist.gamma.mean) + Ezz
+    tau = model.W_dist.gamma.mean
+    P = jnp.diag(tau) + Ezz
     nat1 = jnp.sum(Ez[..., None, :] * X_centered[..., None], axis=0)
     mvn = eqx.tree_at(lambda x: (x.nat1, x.nat2), model.W_dist.mvn, (nat1, -0.5 * P))
+    W = mvn.mean
+    sigma_sqr_w = jnp.diagonal(mvn.covariance, axis1=-1, axis2=-2)
 
     # update noise precision
     n_observed = jnp.sum(mask, axis=0)
-    dnat1 = 0.5 * n_observed
-    dnat2 = -0.5 * (jnp.sum(E_xx, axis=0) - jnp.sum(mvn.mean * nat1, -1))
+    dnat1 = 0.5 * (n_observed + jnp.minimum(jnp.arange(model.n_features) + 1, model.n_components))
+
+    dnat2 = -0.5 * (
+        jnp.square(X_centered).sum(0) - 2 * jnp.sum((Ez @ W.mT) * X_centered, 0) + jnp.sum((W @ Ezz) * W, -1)
+    )
+    dnat2 -= 0.5 * (sigma_sqr_w + jnp.square(W)) @ tau
 
     if model.isotropic_noise:
         # Single precision for all features
@@ -105,14 +111,13 @@ def m_step(
     gamma_np = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), model.noise_precision, (dnat1, dnat2))
 
     # update tau
-    W = mvn.mean
-    dnat2 = -0.5 * jnp.diag(mvn.covariance.sum(0) + (W.mT * gamma_np.mean) @ W)
+    dnat2 = -0.5 * jnp.sum(sigma_sqr_w + gamma_np.mean[..., None] * jnp.square(W), 0)
 
     # Create new W distribution
     gamma_tau = eqx.tree_at(lambda x: x.dnat2, model.W_dist.gamma, dnat2)
     new_W_dist = eqx.tree_at(lambda x: (x.mvn, x.gamma), model.W_dist, (mvn, gamma_tau))
 
-    # Update model with new W distribution
+    # Update model with posterior distributions
     updated_model = eqx.tree_at(
         lambda x: (x.W_dist, x.noise_precision),
         model,
@@ -263,19 +268,16 @@ def _expected_log_likelihood(
     return exp_ll
 
 
-def _kl_latent(model: BayesianFactorAnalysisParams, qz: MultivariateNormal) -> Array:
+def _kl_latent(qz: MultivariateNormal) -> Array:
     """Compute KL(q(Z)||p(Z)).
 
     Args:
-        model: BayesianFactorAnalysis model parameters
         qz: Posterior distribution over latent variables
 
     Returns:
         KL divergence
     """
-    return qz.kl_divergence(
-        MultivariateNormal(loc=jnp.zeros_like(qz.mean), precision=jnp.eye(model.n_components))
-    ).sum()
+    return qz.kl_divergence(MultivariateNormal(loc=jnp.zeros_like(qz.mean), precision=jnp.eye(qz.shape[-1]))).sum()
 
 
 def _kl_loading(model: BayesianFactorAnalysisParams) -> Array:
@@ -287,7 +289,19 @@ def _kl_loading(model: BayesianFactorAnalysisParams) -> Array:
     Returns:
         KL divergence
     """
-    return model.W_dist.kl_divergence_from_prior.sum()
+    exp_tau = model.W_dist.gamma.mean
+    exp_phi = model.noise_precision.mean * jnp.ones(model.n_features)
+    W = model.W_dist.mvn.mean
+    cov = model.W_dist.mvn.covariance
+    sigma_sqr_w = jnp.diagonal(cov, axis1=-1, axis2=-2)
+
+    exp_ln_tau = model.W_dist.gamma.expected_sufficient_statistics[..., 0]
+    kl = -jnp.sum((exp_ln_tau - jnp.log(2 * jnp.pi)) * (model.n_features - jnp.arange(model.n_components))) / 2
+    kl -= model.W_dist.mvn.mask.sum() * jnp.log(2 * jnp.pi) / 2
+    kl += 0.5 * jnp.inner(exp_phi, (jnp.square(W) + sigma_sqr_w) @ exp_tau)
+    _, logdet = safe_cholesky_and_logdet(model.W_dist.mvn.precision)
+    kl += 0.5 * logdet.sum()
+    return kl
 
 
 def _kl_noise(model: BayesianFactorAnalysisParams) -> Array:
@@ -319,8 +333,9 @@ def compute_elbo(model: BayesianFactorAnalysisParams, X: Union[Array, Distributi
     exp_ll = _expected_log_likelihood(model, X_dist, qz)
 
     # KL terms
-    kl_z = _kl_latent(model, qz)
+    kl_z = _kl_latent(qz)
     kl_w = _kl_loading(model)
-    kl_tau = _kl_noise(model)
+    kl_tau = model.W_dist.gamma.kl_divergence_from_prior.sum(-1)
+    kl_phi = _kl_noise(model)
 
-    return exp_ll - kl_z - kl_w - kl_tau
+    return exp_ll - kl_z - kl_w - kl_tau - kl_phi
