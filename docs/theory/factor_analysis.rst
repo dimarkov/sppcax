@@ -184,13 +184,13 @@ where:
 VBM-step:
 ---------
 
-We will split the variational Bayes maximisation step in several smaller 
-steps. Frist we update the parameters of :math:`q(\pmb{\mu})`, while keeping 
+We will split the variational Bayes maximisation step in several smaller
+steps. Frist we update the parameters of :math:`q(\pmb{\mu})`, while keeping
 all the other factors fixed, as:
 
 .. math::
 
-   \pmb{\Sigma} &= \left( N \pmb{\bar{\Psi}} + \beta I \right)^{-1} \\ 
+   \pmb{\Sigma} &= \left( N \pmb{\bar{\Psi}} + \beta I \right)^{-1} \\
    \pmb{m} &= \pmb{\Sigma} \pmb{\bar{\Psi}} \sum_n \left( \pmb{x}_n - \pmb{M} \pmb{\mu}_n \right)
 
 Next we update the parameters of the joint posterior :math:`q(\pmb{W}, \pmb{\psi})` of the loading matrix and noise precision as follows:
@@ -201,7 +201,7 @@ Next we update the parameters of the joint posterior :math:`q(\pmb{W}, \pmb{\psi
 
 where :math:`\pmb{P}_d = \pmb{\Sigma}_d^{-1}`. Note that to recover the structurally constrained
 loading matrix, as described in :math:numref:`lmstr` we simply force to zero the redundant
-parameters in the mean and the covariance matrix. 
+parameters in the mean and the covariance matrix.
 
 The update equations for :math:`q(\pmb{\psi})` are depend on the model variant.
 For the PFA variant (diagonal noise):
