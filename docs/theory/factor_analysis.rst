@@ -11,6 +11,16 @@ In the Bayesian approach to factor analysis, we place prior distributions both o
 of the model, and factors and use Bayesian inference to estimate the posterior distributions.
 
 This document provides the mathematical foundations for the Bayesian Factor Analysis model implemented in ``sppcax``.
+The implementation provides two variants of the model:
+
+1. **Probabilistic Principal Component Analysis (PPCA)**:
+   - Uses isotropic noise (same precision for all dimensions)
+   - Equivalent to PCA in the limit of infinite precision
+
+2. **Factor Analysis (FA)**:
+   - Uses diagonal noise (different precision for each dimension)
+   - More flexible in modeling different noise levels across dimensions
+
 
 Model Definition
 ================
@@ -88,6 +98,7 @@ to a tighter ELBO bound as requires less factorization in the approximate poster
 Note that we use a specifically constrained parameterisation of the loading matrix as follows
 
 .. math::
+   :label: lmstr
 
    W = \pmatrix{w_{11} & 0 & 0 & \ldots & 0 \\
     w_{21} & w_{22} & 0 & \ldots & 0 \\
@@ -167,31 +178,32 @@ Here we update the posterior over latent variables, :math:`q(\mathbf{Z})`. For e
 
 where:
 
-- :math:`\mathbb{E}_q[\mathbf{W}^T \boldsymbol{\Psi} \mathbf{W}] = \pmb{M}^T \bar{\pmb{\Psi}}\pmb{M} + \sum_d \pmb{\Sigma}_d` is the expected precision of the latent space
-- :math:`\mathbb{E}_q\left[\mathbf{W}^T \boldsymbol{\Psi} (\mathbf{x}_n - \boldsymbol{\mu}) \right]=\pmb{M}^T \pmb{\bar{\Psi}} (\mathbf{x}_n - \pmb{m})` is the precision weighted expected error
+  - :math:`\mathbb{E}_q[\mathbf{W}^T \boldsymbol{\Psi} \mathbf{W}] = \pmb{M}^T \bar{\pmb{\Psi}}\pmb{M} + \sum_d \pmb{\Sigma}_d` is the expected precision of the latent space
+  - :math:`\mathbb{E}_q\left[\mathbf{W}^T \boldsymbol{\Psi} (\mathbf{x}_n - \boldsymbol{\mu}) \right]=\pmb{M}^T \pmb{\bar{\Psi}} (\mathbf{x}_n - \pmb{m})` is the precision weighted expected error
 
 VBM-step:
 ---------
 
-The updates for the loading matrix and noise precision involve computing the natural gradient of the ELBO with respect to the natural parameters of the distributions.
-
-For the loading matrix, the update involves:
+We will split the variational Bayes maximisation step in several smaller 
+steps. Frist we update the parameters of :math:`q(\pmb{\mu})`, while keeping 
+all the other factors fixed, as:
 
 .. math::
 
-   \mathbb{E}[\mathbf{W}] = \mathbb{E}[\mathbf{X} \mathbf{Z}^T] (\mathbb{E}[\mathbf{Z} \mathbf{Z}^T])^{-1}
+   \pmb{\Sigma} &= \left( N \pmb{\bar{\Psi}} + \beta I \right)^{-1} \\ 
+   \pmb{m} &= \pmb{\Sigma} \pmb{\bar{\Psi}} \sum_n \left( \pmb{x}_n - \pmb{M} \pmb{\mu}_n \right)
 
-Where expectations are taken with respect to the current variational distributions.
+Next we update the parameters of the joint posterior :math:`q(\pmb{W}, \pmb{\psi})` of the loading matrix and noise precision as follows:
+
+.. math::
+   \pmb{P}_d &= \text{diag}(\pmb{\pmb{\tau}}) + \sum_n \left\langle \pmb{z}_n \pmb{z}_n^T \right\rangle \\
+   \pmb{P}_d \pmb{\mu}_d &=   \sum_n \pmb{\mu}_n (\pmb{x}_n - \pmb{m})^T
+
+where :math:`\pmb{P}_d = \pmb{\Sigma}_d^{-1}`. Note that to recover the structurally constrained
+loading matrix, as described in :math:numref:`lmstr` we simply force to zero the redundant
+parameters in the mean and the covariance matrix. 
 
 The update equations for :math:`q(\pmb{\psi})` are depend on the model variant.
-For the noise precision, in the PPCA variant (isotropic noise):
-
-.. math::
-
-   \alpha^\psi &= \alpha^\psi_0 + \frac{n D + \sum_d min(d, K)}{2} \\
-   \beta^\psi & = \beta^\psi_0 + \frac{\sum_n \pmb{x}_n^2 - \pmb{m})}{2}
-   \mathbb{E}[\psi] = \frac{\alpha_0 + ND/2}{\beta_0 + \frac{1}{2}\sum_{n=1}^N \mathbb{E}[||\mathbf{x}_n - \mathbf{W}\mathbf{z}_n||^2]}
-
 For the PFA variant (diagonal noise):
 
 .. math::
@@ -200,7 +212,15 @@ For the PFA variant (diagonal noise):
    \beta^\psi_d &= \beta^\psi_0 + \frac{1}{2}\sum_n \left[(x_{n,d}^c - \pmb{\mu}_d^T \pmb{\mu}_n)^2
    + \pmb{\mu}_d^T \pmb{\Sigma}_n \pmb{\mu}_d\right] + \frac{N}{2}[\sigma^2_m]_{d} + \frac{1}{2}\sum_{k=1}^d \bar{\tau}_k (\sigma_{dk}^2 + \mu_{dk}^2)
 
-where :math:`\mathbf{w}_d` is the :math:`d`-th row of the loading matrix.
+The PPCA variant is then obtained as :math:`\alpha^{\psi} = \alpha_0^{\psi} + \sum_d \delta \alpha_d^\psi`, and
+:math:`\beta^\psi=\beta_0^\psi + \sum_d \delta \beta_d^{\psi}`.
+
+In the finall step of the VBM, we update :math:`q(\pmb{\tau})` as
+
+.. math::
+
+   \alpha^{\tau}_k &= \alpha_0^{\tau} + \frac{D - k + 1}{2}\\
+   \beta^{\tau}_k &= \beta_0^{\tau} + \frac{1}{2} \sum_{j=k}^D \bar{\psi}_j \left[\sigma^2_{d, jk} + \mu^2_{d, jk} \right]
 
 Handling Missing Data
 =====================
@@ -213,20 +233,6 @@ The expected log-likelihood term in the ELBO is then modified to only include ob
 
    \mathbb{E}_{q}[\log p(\mathbf{X} | \mathbf{Z}, \mathbf{W}, \boldsymbol{\Psi})] = \sum_{n=1}^N \sum_{d=1}^D m_{nd} \mathbb{E}_{q}[\log p(x_{nd} | \mathbf{z}_n, \mathbf{w}_d, \psi_d)]
 
-The E-step update equations are also modified to account for the mask, ensuring that missing values do not influence the posterior distributions.
-
-Probabilistic PCA vs. Factor Analysis
-=====================================
-
-The implementation provides two variants of the model:
-
-1. **Probabilistic Principal Component Analysis (PPCA)**:
-   - Uses isotropic noise (same precision for all dimensions)
-   - Equivalent to PCA in the limit of infinite precision
-
-2. **Factor Analysis (FA)**:
-   - Uses diagonal noise (different precision for each dimension)
-   - More flexible in modeling different noise levels across dimensions
 
 References
 ==========
