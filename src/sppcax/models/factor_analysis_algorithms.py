@@ -102,12 +102,18 @@ def m_step(
     dnat2 = -0.5 * (jnp.square(X_centered - Ez @ W.mT).sum(0) + jnp.sum((W @ cov_z) * W, -1))
     dnat2 -= 0.5 * (sigma_sqr_w + jnp.square(W)) @ tau
 
+    nat2_0 = dnat2 * (model.noise_precision.nat1_0 + 1) / dnat1 if use_bmr else None
+
     if model.isotropic_noise:
         # Single precision for all features
         dnat1 = jnp.sum(dnat1)
         dnat2 = jnp.sum(dnat2)
+        nat2_0 = jnp.sum(nat2_0) if use_bmr else None
 
-    gamma_np = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), model.noise_precision, (dnat1, dnat2))
+    if use_bmr:
+        gamma_np = eqx.tree_at(lambda x: (x.dnat1, x.dnat2, x.nat2_0), model.noise_precision, (dnat1, dnat2, nat2_0))
+    else:
+        gamma_np = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), model.noise_precision, (dnat1, dnat2))
 
     # update tau
     dnat1 = mvn.mask.sum(0) / 2
@@ -169,7 +175,7 @@ def fit(
         elbos.append(elbo_val)
 
         # M-step (returns updated model)
-        updated_model = m_step(updated_model, X_dist, qz)
+        updated_model = m_step(updated_model, X_dist, qz, use_bmr=updated_model.optimize_with_bmr)
 
         # Apply Bayesian Model Reduction if enabled
         if use_bmr and ((n + 1) % bmr_frequency == 0):

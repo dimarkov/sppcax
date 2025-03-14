@@ -35,6 +35,9 @@ class BayesianFactorAnalysisParams(eqx.Module):
     noise_precision: Gamma  # Single precision for PPCA or per-feature for FA
     sparsity_prior: Beta  # Prior over sparsity probaility
     mean_: Array  # Data mean for centering
+    optimize_with_bmr: bool = (
+        False  # Whether to apply Bayesian Model Reduction optimization for tau and psi at every step
+    )
     data_mask: Optional[Array] = None  # Mask for missing data (True for observed, False for missing)
     random_state: Optional[PRNGKey] = None
 
@@ -43,6 +46,7 @@ class BayesianFactorAnalysisParams(eqx.Module):
         n_components: int,
         n_features: int,
         isotropic_noise: bool = False,
+        optimize_with_bmr: bool = False,
         data_mask: Optional[Array] = None,
         random_state: Optional[PRNGKey] = None,
     ):
@@ -59,6 +63,7 @@ class BayesianFactorAnalysisParams(eqx.Module):
         self.n_components = n_components
         self.n_features = n_features
         self.isotropic_noise = isotropic_noise
+        self.optimize_with_bmr = optimize_with_bmr
         self.random_state = random_state
         self.data_mask = data_mask
 
@@ -118,6 +123,7 @@ class PPCA(BayesianFactorAnalysisParams):
         self,
         n_components: int,
         n_features: int,
+        optimize_with_bmr: bool = False,
         random_state: Optional[PRNGKey] = None,
         data_mask: Optional[Array] = None,
     ):
@@ -134,6 +140,7 @@ class PPCA(BayesianFactorAnalysisParams):
             n_components=n_components,
             n_features=n_features,
             isotropic_noise=True,
+            optimize_with_bmr=optimize_with_bmr,
             random_state=random_state,
             data_mask=data_mask,
         )
@@ -146,6 +153,7 @@ class PFA(BayesianFactorAnalysisParams):
         self,
         n_components: int,
         n_features: int,
+        optimize_with_bmr: bool = False,
         random_state: Optional[PRNGKey] = None,
         data_mask: Optional[Array] = None,
     ):
@@ -162,6 +170,7 @@ class PFA(BayesianFactorAnalysisParams):
             n_components=n_components,
             n_features=n_features,
             isotropic_noise=False,
+            optimize_with_bmr=optimize_with_bmr,
             random_state=random_state,
             data_mask=data_mask,
         )
