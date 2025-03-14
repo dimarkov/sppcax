@@ -97,7 +97,7 @@ def m_step(
 
     # update noise precision
     n_observed = jnp.sum(mask, axis=0)
-    dnat1 = 0.5 * (n_observed + jnp.minimum(jnp.arange(model.n_features) + 1, model.n_components))
+    dnat1 = 0.5 * (n_observed + mvn.mask.sum(-1))
 
     dnat2 = -0.5 * (jnp.square(X_centered - Ez @ W.mT).sum(0) + jnp.sum((W @ cov_z) * W, -1))
     dnat2 -= 0.5 * (sigma_sqr_w + jnp.square(W)) @ tau
@@ -110,11 +110,13 @@ def m_step(
     gamma_np = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), model.noise_precision, (dnat1, dnat2))
 
     # update tau
-    dnat1 = (model.n_features - jnp.arange(model.n_components)) / 2
+    dnat1 = mvn.mask.sum(0) / 2
     dnat2 = -0.5 * jnp.sum(sigma_sqr_w + gamma_np.mean[..., None] * jnp.square(W), 0)
+    nat2_0 = dnat2 * (model.W_dist.gamma.nat1_0 + 1)
+    nat2_0 = jnp.where(dnat1 > 0, nat2_0 / dnat1, model.W_dist.gamma.nat2_0)
 
     # Create new W distribution
-    gamma_tau = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), model.W_dist.gamma, (dnat1, dnat2))
+    gamma_tau = eqx.tree_at(lambda x: (x.dnat1, x.dnat2, x.nat2_0), model.W_dist.gamma, (dnat1, dnat2, nat2_0))
     new_W_dist = eqx.tree_at(lambda x: (x.mvn, x.gamma), model.W_dist, (mvn, gamma_tau))
 
     # Update model with posterior distributions
@@ -123,10 +125,6 @@ def m_step(
         model,
         (new_W_dist, gamma_np),
     )
-
-    # Apply Bayesian Model Reduction if enabled
-    if use_bmr:
-        updated_model = reduce_model(updated_model)
 
     return updated_model
 
@@ -171,8 +169,11 @@ def fit(
         elbos.append(elbo_val)
 
         # M-step (returns updated model)
-        use_bmr_now = use_bmr and ((n + 1) % bmr_frequency == 0)
-        updated_model = m_step(updated_model, X_dist, qz, use_bmr=use_bmr_now)
+        updated_model = m_step(updated_model, X_dist, qz)
+
+        # Apply Bayesian Model Reduction if enabled
+        if use_bmr and ((n + 1) % bmr_frequency == 0):
+            updated_model = reduce_model(updated_model)
 
         # Check convergence
         if jnp.abs(elbo_val - old_elbo) < tol:
@@ -218,7 +219,7 @@ def inverse_transform(model: BayesianFactorAnalysisParams, Z: Union[Array, Distr
 def _expected_log_likelihood(
     model: BayesianFactorAnalysisParams, X_dist: Distribution, qz: MultivariateNormal
 ) -> Array:
-    """Compute expected log likelihood E_q[log p(X|Z,W,τ)].
+    """Compute expected log likelihood E_q[log p(X|Z,W, psi)].
 
     Args:
         model: BayesianFactorAnalysis model parameters
@@ -239,8 +240,10 @@ def _expected_log_likelihood(
     # Get expected sufficient statistics
     dim = X_dist.event_shape[0]
     exp_stats = X_dist.expected_sufficient_statistics
+    m = model.mean_
     E_x = exp_stats[..., :dim]
-    E_xx = exp_stats[..., dim :: dim + 1]
+    E_x_centered = exp_stats[..., :dim] - m
+    E_xx_centered = exp_stats[..., dim :: dim + 1] + m**2 - 2 * m * E_x
 
     # Get mask
     mask = model._validate_mask(E_x)
@@ -254,14 +257,13 @@ def _expected_log_likelihood(
     exp_ll = -0.5 * n_observed * jnp.log(2 * jnp.pi)
     exp_ll += 0.5 * jnp.sum(mask * exp_log_prec)
 
-    # E[(x - Wz)^T τ (x - Wz)]
-    x_centered = E_x - model.mean_
-    term1 = jnp.sum(exp_noise_precision * mask * E_xx)
-    term2 = -2 * jnp.sum(exp_noise_precision * mask * (x_centered * (W @ Ez[..., None]).squeeze(-1)))
+    # E[(x - Wz - m)^T \psi (x - Wz- m)]
+    term1 = jnp.sum(exp_noise_precision * mask * E_xx_centered)
+    term2 = -2 * jnp.sum(exp_noise_precision * mask * (E_x_centered * (W @ Ez[..., None]).squeeze(-1)))
     term3 = jnp.trace((exp_noise_precision * mask)[..., None] * (W @ Ezz @ W.T), axis1=-1, axis2=-2).sum()
 
-    exp_cov = model.W_dist.expected_covariance
-    term4 = jnp.trace(mask[..., None, None] * (exp_cov @ jnp.expand_dims(Ezz, -3)), axis1=-1, axis2=-2).sum()
+    cov = model.W_dist.mvn.covariance
+    term4 = jnp.trace(mask[..., None, None] * (cov @ jnp.expand_dims(Ezz, -3)), axis1=-1, axis2=-2).sum()
 
     exp_ll -= 0.5 * (term1 + term2 + term3 + term4)
 
