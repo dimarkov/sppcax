@@ -170,7 +170,7 @@ def fit(
     elbos = []
     for n in range(n_iter):
         # E-step
-        qz = e_step(updated_model, X_dist)
+        qz = eqx.filter_jit(e_step)(updated_model, X_dist)
         elbo_val = compute_elbo(updated_model, X_dist, qz)
         elbos.append(elbo_val)
 
@@ -179,7 +179,7 @@ def fit(
 
         # Apply Bayesian Model Reduction if enabled
         if use_bmr and ((n + 1) % bmr_frequency == 0):
-            updated_model = reduce_model(updated_model)
+            updated_model = eqx.filter_jit(reduce_model)(updated_model)
 
         # Check convergence
         if jnp.abs(elbo_val - old_elbo) < tol:
