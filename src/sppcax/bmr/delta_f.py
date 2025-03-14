@@ -9,16 +9,16 @@ from ..models.factor_analysis_params import PFA
 from ..types import Array, Matrix, PRNGKey, Scalar, Tuple, Vector
 
 
-def ln_c(alpha: Array, beta: Array):
-    return gammaln(alpha - 1 / 2) - gammaln(alpha) + jnp.log(beta) / 2
+def ln_c(alpha: Vector, beta: Vector, r: Vector):
+    return gammaln(alpha - r / 2) - gammaln(alpha) + r * jnp.log(beta) / 2
 
 
-def compute_delta_f(lam_d, lm_mean_d, lm_prec_d, alpha_d, beta_d, ln_c_k) -> Array:
-    delta_f = jnp.inner(lam_d, ln_c_k)
+def compute_delta_f(pruned_d, lm_mean_d, lm_prec_d, alpha_d, beta_d, ln_c) -> Array:
+    delta_f = ln_c
     L = jnp.linalg.cholesky(lm_prec_d)
-    tilde_mu = L.mT @ (lam_d * lm_mean_d)
+    tilde_mu = L.mT @ (pruned_d * lm_mean_d)
 
-    delta_f += jnp.inner(jnp.log(jnp.diag(L)), lam_d)
+    delta_f += jnp.inner(jnp.log(jnp.diag(L)), pruned_d)
 
     delta_f += alpha_d * jnp.log(beta_d)
     delta_f -= alpha_d * jnp.log(beta_d + jnp.inner(tilde_mu, tilde_mu) / 2)
@@ -50,7 +50,6 @@ def gibbs_sampler_pfa(key: PRNGKey, model: PFA, pi: Scalar, lam: Matrix, delta_f
     mask = posterior.mvn.mask  # initial mask over loading matrix
     lm_mean = posterior.mvn.mean  # loading matrix mean
     lm_prec = posterior.mvn.precision  # loading matrix precision
-    ln_c_k = ln_c(posterior.gamma.alpha, posterior.gamma.beta)
     eta = jnp.log(pi) - jnp.log(1 - pi)
     D, K = lam.shape
 
@@ -58,9 +57,12 @@ def gibbs_sampler_pfa(key: PRNGKey, model: PFA, pi: Scalar, lam: Matrix, delta_f
         lam, delta_f, key = carry
 
         _lam_k = lam[:, k]
-        lam = lam.at[:, k].set(~_lam_k)
+        lam = mask * lam.at[:, k].set(~_lam_k)
+        pruned = mask.astype(jnp.int8) - lam
+        r = pruned.sum(0)
+        ln_c_d = ln_c(posterior.gamma.alpha, posterior.gamma.beta, r).sum() / D
         delta_f_d = vmap(compute_delta_f, in_axes=(0, 0, 0, 0, 0, None))(
-            lam, lm_mean, lm_prec, rho.alpha, rho.beta, ln_c_k
+            pruned, lm_mean, lm_prec, rho.alpha, rho.beta, ln_c_d
         )
 
         tmp = delta_f_d - delta_f

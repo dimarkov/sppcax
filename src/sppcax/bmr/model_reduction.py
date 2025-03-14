@@ -46,8 +46,11 @@ def reduce_model(model: PFA, max_iter: int = 4) -> PFA:
 
     # Update the model
     mvn_W = eqx.tree_at(lambda x: x.mask, model.W_dist.mvn, lam)  # update the mask of the loading matrix
-    W_dist = eqx.tree_at(lambda x: x.mvn, model.W_dist, mvn_W)
-    dnat2 = model.noise_precision.dnat2  # TODO: add correction to beta values
+    dnat1 = lam.sum(0) / 2
+    tau = eqx.tree_at(lambda x: x.dnat1, model.W_dist.gamma, dnat1)
+    W_dist = eqx.tree_at(lambda x: (x.mvn, x.gamma), model.W_dist, (mvn_W, tau))
+
+    dnat2 = model.noise_precision.dnat2  # TODO: add BMR correction to beta values
     noise_precision = eqx.tree_at(lambda x: x.dnat2, model.noise_precision, dnat2)
     model = eqx.tree_at(
         lambda x: (x.W_dist, x.sparsity_prior, x.noise_precision, x.random_state),
