@@ -130,7 +130,7 @@ the expectation over the inverse square root of :math:`\tau_k`
 
 .. math::
    c_k^i = \int d \tau_k q_0(\tau_k) \tau_k^{- r_k^i / 2} =
-   [\beta_k^\tau]^{- r_k^i / 2} \frac{\Gamma(\alpha_k^\tau - r_k^i/2)}{\Gamma(\alpha_k^\tau)}
+   [\beta_k^\tau]^{r_k^i / 2} \frac{\Gamma(\alpha_k^\tau - r_k^i/2)}{\Gamma(\alpha_k^\tau)}
 
 We will use :math:`C_{i} = \prod_{k} c_k^i` to denote the product of corresponding factors.
 
@@ -147,6 +147,7 @@ a single element of the loading matrix (e.g. at the position :math:`d, k^*`) is 
 .. math::
    \Delta F_{i:i-1} &= \Delta F_{i} - \Delta F_{i-1} \\
    &= \ln \frac{c_{k^*}^i}{c_{k^*}^{i-1}} - \frac{1}{2}\ln \sigma_{d,k^*}^2 - \alpha_d^\psi \ln \left( \frac{\beta_d^\psi + \frac{1}{2}[\pmb{\tilde{\mu}}_d^T \pmb{\tilde{\Sigma}}_d^{-1} \pmb{\tilde{\mu}}_d]_i}{\beta_d^\psi + \frac{1}{2}[\pmb{\tilde{\mu}}_d^T \pmb{\tilde{\Sigma}}_d^{-1} \pmb{\tilde{\mu}}_d]_{i-1}}\right)
+
 
 
 Gibbs sampling
@@ -210,7 +211,13 @@ then the updated posterior is obtained as follows:
          \alpha_{d,i}^\psi &= \alpha_d^\psi \\
          \beta_{d, i}^\psi &= \beta_d^\psi + \frac{1}{2} \cdot \pmb{\tilde{\mu}}_{di}^T \pmb{\tilde{\Sigma}}_{di}^{-1} \pmb{\tilde{\mu}}_{di}
 
-   3.  :math:`q_i(\pmb{\tau})` remains unchanged, hence :math:`q_i(\pmb{\tau}) = q_0(\pmb{\tau})`.
+   3.  :math:`q_i(\pmb{\tau})` is updated assume
+
+       .. math::
+         \alpha_{k, i}^\tau &= \alpha_k^\tau - r_k^i/2 \\
+         \beta_{k, i}^\tau &= \beta_k^\tau
+
+
 References
 ==========
 
