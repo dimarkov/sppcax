@@ -23,6 +23,10 @@
         :alt: Twitter
         :target: https://twitter.com/sppcax
 
+.. image:: https://readthedocs.org/projects/sppcax/badge/?version=latest
+    :alt: ReadTheDocs
+    :target: https://sppcax.readthedocs.io/en/latest/
+
 .. image:: https://img.shields.io/badge/-PyScaffold-005CA0?logo=pyscaffold
     :alt: Project generated with PyScaffold
     :target: https://pyscaffold.org/
