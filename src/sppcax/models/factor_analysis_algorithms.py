@@ -4,19 +4,37 @@ from typing import List, Tuple, Union
 
 import equinox as eqx
 import jax.numpy as jnp
+from jax import random as jr
 from jax.scipy.linalg import solve_triangular
 
 from sppcax.distributions.utils import safe_cholesky_and_logdet
 
 from ..bmr import reduce_model
-from ..distributions.base import Distribution
-from ..distributions.mvn import MultivariateNormal
-from ..types import Array
-from .factor_analysis_params import BayesianFactorAnalysisParams, _to_distribution
+from ..distributions import Delta, Distribution, MultivariateNormal
+from ..types import Array, Matrix, PRNGKey
+from .factor_analysis_params import BayesianFactorAnalysisParams
+
+
+def _to_distribution(X: Union[Array, Distribution]) -> Distribution:
+    """Convert input to a Distribution if it isn't already.
+
+    Args:
+        X: Input data, either an Array or Distribution
+
+    Returns:
+        Distribution instance
+    """
+    if isinstance(X, Distribution):
+        return X
+    return Delta(X)
 
 
 def e_step(
-    model: BayesianFactorAnalysisParams, X: Union[Array, Distribution], use_data_mask: bool = True
+    model: BayesianFactorAnalysisParams,
+    X: Union[Matrix, Distribution],
+    use_data_mask: bool = True,
+    use_bmr: bool = False,
+    key: PRNGKey = None,
 ) -> MultivariateNormal:
     """E-step: Compute expected latent variables.
 
@@ -24,6 +42,8 @@ def e_step(
         model: BayesianFactorAnalysis model parameters
         X: Data matrix of shape (n_samples, n_features) or Distribution instance
         use_data_mask: apply data mask (default True)
+        use_bmr: apply Bayesian Model Reduction (default False)
+        key: random number generator key
 
     Returns:
         qz: Posterior distribution over latents z in the form of a MultivariateNormal distribution
@@ -58,6 +78,9 @@ def e_step(
     Ez = Ez.squeeze(-1)
     qz = MultivariateNormal(loc=Ez, precision=P)
 
+    if use_bmr:
+        qz = reduce_model(qz, key=key, **model.bmr_e_step.opts)
+
     return qz
 
 
@@ -81,6 +104,7 @@ def m_step(
 
     mask = model._validate_mask(E_x)
     X_centered = jnp.where(mask, E_x - model.mean_, 0.0)
+    sigma_sqr_x = jnp.where(mask, jnp.diagonal(X_dist.covariance, axis1=-1, axis2=-2), 0.0).sum(0)
 
     exp_stats = qz.expected_sufficient_statistics
     Ez = exp_stats[..., : model.n_components]
@@ -101,6 +125,7 @@ def m_step(
 
     dnat2 = -0.5 * (jnp.square(X_centered - Ez @ W.mT).sum(0) + jnp.sum((W @ cov_z) * W, -1))
     dnat2 -= 0.5 * (sigma_sqr_w + jnp.square(W)) @ tau
+    dnat2 -= 0.5 * sigma_sqr_x
 
     nat2_0 = dnat2 * (model.noise_precision.nat1_0 + 1) / dnat1 if use_bmr else None
 
@@ -137,11 +162,11 @@ def m_step(
 
 def fit(
     model: BayesianFactorAnalysisParams,
-    X: Union[Array, Distribution],
+    X: Union[Matrix, Distribution],
     n_iter: int = 100,
     tol: float = 1e-6,
-    use_bmr: bool = False,
     bmr_frequency: int = 1,
+    key: PRNGKey = None,
 ) -> Tuple[BayesianFactorAnalysisParams, List[float]]:
     """Fit the model using EM algorithm with optional Bayesian Model Reduction.
 
@@ -150,8 +175,8 @@ def fit(
         X: Training data of shape (n_samples, n_features) or Distribution instance
         n_iter: Maximum number of iterations
         tol: Convergence tolerance
-        use_bmr: Whether to use Bayesian Model Reduction to create a sparse loading matrix
         bmr_frequency: Apply BMR every N M-steps
+        key: Random number generator key
 
     Returns:
         model: Fitted model instance
@@ -170,16 +195,19 @@ def fit(
     elbos = []
     for n in range(n_iter):
         # E-step
-        qz = eqx.filter_jit(e_step)(updated_model, X_dist)
-        elbo_val = compute_elbo(updated_model, X_dist, qz)
+        key, _key = jr.split(key)
+        use_bmr = updated_model.bmr_e_step.use and (n > 32)
+        qz = eqx.filter_jit(e_step)(updated_model, X_dist, use_bmr=use_bmr, key=_key)
+        elbo_val = eqx.filter_jit(compute_elbo)(updated_model, X_dist, qz)
         elbos.append(elbo_val)
 
         # M-step (returns updated model)
-        updated_model = m_step(updated_model, X_dist, qz, use_bmr=updated_model.optimize_with_bmr)
+        updated_model = eqx.filter_jit(m_step)(updated_model, X_dist, qz, use_bmr=updated_model.optimize_with_bmr)
 
         # Apply Bayesian Model Reduction if enabled
-        if use_bmr and ((n + 1) % bmr_frequency == 0):
-            updated_model = eqx.filter_jit(reduce_model)(updated_model)
+        if updated_model.bmr_m_step.use and ((n + 1) % bmr_frequency == 0):
+            key, _key = jr.split(key)
+            updated_model = eqx.filter_jit(reduce_model)(updated_model, key=_key, **updated_model.bmr_m_step.opts)
 
         # Check convergence
         if jnp.abs(elbo_val - old_elbo) < tol:
@@ -190,7 +218,11 @@ def fit(
 
 
 def transform(
-    model: BayesianFactorAnalysisParams, X: Union[Array, Distribution], use_data_mask: bool = False
+    model: BayesianFactorAnalysisParams,
+    X: Union[Matrix, Distribution],
+    use_data_mask: bool = False,
+    use_bmr: bool = False,
+    key: PRNGKey = None,
 ) -> MultivariateNormal:
     """Apply dimensionality reduction to X.
 
@@ -198,11 +230,13 @@ def transform(
         model: BayesianFactorAnalysis model parameters
         X: Data matrix of shape (n_samples, n_features) or Distribution instance
         use_data_mask: apply data mask (default False)
+        use_bmr: apply Bayesian Model Reduction (default False)
+        key: Random number generator key
 
     Returns:
         qz: Posterior estimate of the latents as MultivariateNormal distribution
     """
-    return e_step(model, X, use_data_mask=use_data_mask)
+    return e_step(model, X, use_data_mask=use_data_mask, use_bmr=use_bmr, key=key)
 
 
 def inverse_transform(model: BayesianFactorAnalysisParams, Z: Union[Array, Distribution]) -> MultivariateNormal:
@@ -224,7 +258,7 @@ def inverse_transform(model: BayesianFactorAnalysisParams, Z: Union[Array, Distr
 
 def _expected_log_likelihood(
     model: BayesianFactorAnalysisParams, X_dist: Distribution, qz: MultivariateNormal
-) -> Array:
+) -> float:
     """Compute expected log likelihood E_q[log p(X|Z,W, psi)].
 
     Args:
@@ -276,7 +310,7 @@ def _expected_log_likelihood(
     return exp_ll
 
 
-def _kl_latent(qz: MultivariateNormal) -> Array:
+def _kl_latent(qz: MultivariateNormal) -> float:
     """Compute KL(q(Z)||p(Z)).
 
     Args:
@@ -288,7 +322,7 @@ def _kl_latent(qz: MultivariateNormal) -> Array:
     return qz.kl_divergence(MultivariateNormal(loc=jnp.zeros_like(qz.mean), precision=jnp.eye(qz.shape[-1]))).sum()
 
 
-def _kl_loading(model: BayesianFactorAnalysisParams) -> Array:
+def _kl_loading(model: BayesianFactorAnalysisParams) -> float:
     """Compute KL(q(W)||p(W)).
 
     Args:
@@ -312,7 +346,7 @@ def _kl_loading(model: BayesianFactorAnalysisParams) -> Array:
     return kl
 
 
-def _kl_noise(model: BayesianFactorAnalysisParams) -> Array:
+def _kl_noise(model: BayesianFactorAnalysisParams) -> float:
     """Compute KL(q(τ)||p(τ)).
 
     Args:
@@ -324,7 +358,7 @@ def _kl_noise(model: BayesianFactorAnalysisParams) -> Array:
     return model.noise_precision.kl_divergence_from_prior.sum()
 
 
-def compute_elbo(model: BayesianFactorAnalysisParams, X: Union[Array, Distribution], qz: MultivariateNormal) -> Array:
+def compute_elbo(model: BayesianFactorAnalysisParams, X: Union[Matrix, Distribution], qz: MultivariateNormal) -> float:
     """Compute Evidence Lower Bound (ELBO).
 
     Args:
