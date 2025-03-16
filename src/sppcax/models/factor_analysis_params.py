@@ -1,28 +1,28 @@
 """Bayesian Factor Analysis parameter containers."""
 
-from typing import Optional, Union
+from typing import Optional
 
 import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
 
-from ..distributions import Beta, Delta, Distribution, Gamma
+from ..distributions import Beta, Gamma
 from ..distributions.mvn_gamma import MultivariateNormalGamma
 from ..types import Array, PRNGKey
 
 
-def _to_distribution(X: Union[Array, Distribution]) -> Distribution:
-    """Convert input to a Distribution if it isn't already.
+class BMROptions(eqx.Module):
+    use: bool = False
+    vals: tuple = ()
 
-    Args:
-        X: Input data, either an Array or Distribution
-
-    Returns:
-        Distribution instance
-    """
-    if isinstance(X, Distribution):
-        return X
-    return Delta(X)
+    @property
+    def opts(self):
+        if len(self.vals) == 2:
+            return {self.vals[0]: self.vals[1]}
+        elif len(self.vals) == 4:
+            return {self.vals[0]: self.vals[1], self.vals[2]: self.vals[3]}
+        else:
+            raise NotImplementedError
 
 
 class BayesianFactorAnalysisParams(eqx.Module):
@@ -35,11 +35,10 @@ class BayesianFactorAnalysisParams(eqx.Module):
     noise_precision: Gamma  # Single precision for PPCA or per-feature for FA
     sparsity_prior: Beta  # Prior over sparsity probaility
     mean_: Array  # Data mean for centering
-    optimize_with_bmr: bool = (
-        False  # Whether to apply Bayesian Model Reduction optimization for tau and psi at every step
-    )
+    optimize_with_bmr: bool  # Whether to apply Bayesian Model Reduction optimization for tau and psi at every step
+    bmr_e_step: BMROptions
+    bmr_m_step: BMROptions
     data_mask: Optional[Array] = None  # Mask for missing data (True for observed, False for missing)
-    random_state: Optional[PRNGKey] = None
 
     def __init__(
         self,
@@ -47,8 +46,13 @@ class BayesianFactorAnalysisParams(eqx.Module):
         n_features: int,
         isotropic_noise: bool = False,
         optimize_with_bmr: bool = False,
+        bmr_e_step: bool = False,
+        bmr_m_step: bool = False,
+        bmr_e_step_opts: Optional[tuple] = ("max_iter", 4, "pi", 0.5),
+        bmr_m_step_opts: Optional[tuple] = ("max_iter", 4),
         data_mask: Optional[Array] = None,
-        random_state: Optional[PRNGKey] = None,
+        *,
+        key: Optional[PRNGKey] = None,
     ):
         """Initialize BayesianFactorAnalysis model parameters.
 
@@ -58,26 +62,27 @@ class BayesianFactorAnalysisParams(eqx.Module):
             isotropic_noise: If True, use same noise precision for all features (PPCA)
             data_mask: Optional boolean array indicating which features are observed (True) or missing (False)
                       Shape should match input data (n_samples, n_features). If None, all features are observed.
-            random_state: Random state for initialization
+            key: A `jax.random.PRNGKey` used to provide randomness for parameter
+            initialisation. (Keyword only argument.)
         """
         self.n_components = n_components
         self.n_features = n_features
         self.isotropic_noise = isotropic_noise
         self.optimize_with_bmr = optimize_with_bmr
-        self.random_state = random_state
         self.data_mask = data_mask
+        self.bmr_e_step = BMROptions(bmr_e_step, bmr_e_step_opts)
+        self.bmr_m_step = BMROptions(bmr_m_step, bmr_m_step_opts)
 
         # Initialize mean
         self.mean_ = jnp.zeros(n_features)
 
         # Initialize parameters
-        self._init_params()
-
-    def _init_params(self) -> None:
-        """Initialize model parameters."""
-        key = self.random_state
         if key is None:
             key = jr.PRNGKey(0)
+        self._init_params(key)
+
+    def _init_params(self, key: PRNGKey) -> None:
+        """Initialize model parameters."""
 
         # Initialize loading matrix columns
         loc = jr.normal(key, (self.n_features, self.n_components)) * 0.01
@@ -124,25 +129,35 @@ class PPCA(BayesianFactorAnalysisParams):
         n_components: int,
         n_features: int,
         optimize_with_bmr: bool = False,
-        random_state: Optional[PRNGKey] = None,
+        bmr_e_step: bool = False,
+        bmr_m_step: bool = False,
+        bmr_e_step_opts: Optional[tuple] = ("max_iter", 4, "pi", 0.5),
+        bmr_m_step_opts: Optional[tuple] = ("max_iter", 4),
         data_mask: Optional[Array] = None,
+        *,
+        key: Optional[PRNGKey] = None,
     ):
         """Initialize PPCA model parameters.
 
         Args:
             n_components: Number of components
             n_features: Number of features
-            random_state: Random state for initialization
             data_mask: Optional boolean array indicating which features are observed (True) or missing (False)
                       Shape should match input data (n_samples, n_features). If None, all features are observed.
+            key: A `jax.random.PRNGKey` used to provide randomness for parameter
+            initialisation. (Keyword only argument.)
         """
         super().__init__(
             n_components=n_components,
             n_features=n_features,
             isotropic_noise=True,
             optimize_with_bmr=optimize_with_bmr,
-            random_state=random_state,
+            bmr_e_step=bmr_e_step,
+            bmr_m_step=bmr_m_step,
+            bmr_e_step_opts=bmr_e_step_opts,
+            bmr_m_step_opts=bmr_m_step_opts,
             data_mask=data_mask,
+            key=key,
         )
 
 
@@ -154,23 +169,33 @@ class PFA(BayesianFactorAnalysisParams):
         n_components: int,
         n_features: int,
         optimize_with_bmr: bool = False,
-        random_state: Optional[PRNGKey] = None,
+        bmr_e_step: bool = False,
+        bmr_m_step: bool = False,
+        bmr_e_step_opts: Optional[tuple] = ("max_iter", 4, "pi", 0.5),
+        bmr_m_step_opts: Optional[tuple] = ("max_iter", 4),
         data_mask: Optional[Array] = None,
+        *,
+        key: Optional[PRNGKey] = None,
     ):
         """Initialize Factor Analysis model parameters.
 
         Args:
             n_components: Number of components
             n_features: Number of features
-            random_state: Random state for initialization
             data_mask: Optional boolean array indicating which features are observed (True) or missing (False)
                       Shape should match input data (n_samples, n_features). If None, all features are observed.
+            key: A `jax.random.PRNGKey` used to provide randomness for parameter
+            initialisation. (Keyword only argument.)
         """
         super().__init__(
             n_components=n_components,
             n_features=n_features,
             isotropic_noise=False,
             optimize_with_bmr=optimize_with_bmr,
-            random_state=random_state,
+            bmr_e_step=bmr_e_step,
+            bmr_m_step=bmr_m_step,
+            bmr_e_step_opts=bmr_e_step_opts,
+            bmr_m_step_opts=bmr_m_step_opts,
             data_mask=data_mask,
+            key=key,
         )
