@@ -1,14 +1,13 @@
 """Functions for Bayesian model reduction."""
 
-
 import equinox as eqx
 from jax import lax
 from jax import numpy as jnp
 from jax import random as jr
 from multipledispatch import dispatch
 
-from ..distributions import Beta, MultivariateNormal
-from ..models.factor_analysis_params import PFA
+from ..distributions import Beta, MultivariateNormal, Gamma
+from ..models.factor_analysis_params import BayesianFactorAnalysisParams, PFA
 from ..types import PRNGKey
 from .delta_f import gibbs_sampler_mvn, gibbs_sampler_pfa
 
@@ -102,4 +101,17 @@ def reduce_model(  # noqa: F811
     # Update the MVN distribution
     model = eqx.tree_at(lambda x: x.mask, model, lam)  # update the mask of the loading matrix
 
+    return model
+
+
+def remove_redundant_latents(model: BayesianFactorAnalysisParams) -> BayesianFactorAnalysisParams:
+    """Remove redundant latent variables from the model."""
+    remaining_components = jnp.nonzero(model.W_dist.mvn.mask.sum(0) > 0)
+
+    alpha = model.W_dist.gamma.alpha[remaining_components]
+    beta = model.W_dist.gamma.beta[remaining_components]
+    gamma = Gamma(alpha, beta)
+
+    W_dist = eqx.tree_at(lambda x: x.gamma, model.W_dist, gamma)
+    model = eqx.tree_at(lambda x: x.W_dist, model, W_dist)
     return model
