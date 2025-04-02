@@ -12,8 +12,6 @@ Requirements
 - Python (>=3.12)
 - JAX
 - Equinox
-- NumPy
-- SciPy
 - multipledispatch
 
 Stable Release

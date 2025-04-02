@@ -33,7 +33,7 @@ Contents
    Installation <installation>
    Usage <usage>
    Mathematical Theory <theory/index>
-   Module Reference <api/modules>
+   Module Reference <api/sppcax>
    Contributions & Help <contributing>
    License <license>
    Authors <authors>

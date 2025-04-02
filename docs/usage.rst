@@ -13,7 +13,7 @@ Here's a simple example of using the Bayesian Factor Analysis model:
 
     import jax.numpy as jnp
     import jax.random as jr
-    from sppcax.models.factor_analysis import PPCA
+    from sppcax.models import PPCA, fit, transform, inverse_transform
 
     # Generate random data
     key = jr.PRNGKey(0)
@@ -28,13 +28,14 @@ Here's a simple example of using the Bayesian Factor Analysis model:
     X = jnp.ones((n_samples, n_features))
 
     # Fit the model
-    model, elbos = model.fit(X, n_iter=50)
+    key, _key = jr.split(key)
+    model, elbos = fit(model, X, n_iter=50, key=_key)
 
     # Transform data to latent space
-    latent_representation = model.transform(X)
+    qz = transform(model, X)
 
     # Reconstruct the data
-    reconstructed_X = model.inverse_transform(latent_representation)
+    reconstructed_X = inverse_transform(model, qz).mean
 
 Factor Analysis vs. PPCA
 ========================
@@ -45,7 +46,7 @@ Factor Analysis vs. PPCA
 
    .. code-block:: python
 
-       from sppcax.models.factor_analysis import PPCA
+       from sppcax.models import PPCA
 
        model = PPCA(n_components=5, n_features=20)
 
@@ -53,9 +54,9 @@ Factor Analysis vs. PPCA
 
    .. code-block:: python
 
-       from sppcax.models.factor_analysis import FactorAnalysis
+       from sppcax.models import PFA
 
-       model = FactorAnalysis(n_components=5, n_features=20)
+       model = PFA(n_components=5, n_features=20)
 
 Handling Missing Data
 =====================
@@ -65,7 +66,7 @@ Both models can handle missing data by providing a mask:
 .. code-block:: python
 
     import jax.numpy as jnp
-    from sppcax.models.factor_analysis import PPCA
+    from sppcax.models import PPCA, fit, transform
 
     # Data with some missing values (marked as False in the mask)
     data = jnp.ones((100, 20))
@@ -80,10 +81,10 @@ Both models can handle missing data by providing a mask:
                  data_mask=mask)
 
     # Fit the model
-    model, elbos = model.fit(data)
+    model, elbos = fit(model, data)
 
     # Transform can use the mask to handle missing values in new data
-    latent = model.transform(data, use_data_mask=True)
+    latent = transform(model, data, use_data_mask=True)
 
 Bayesian Model Reduction
 ========================
@@ -93,29 +94,28 @@ The Bayesian Model Reduction (BMR) algorithm can be used to prune unnecessary pa
 .. code-block:: python
 
     import jax.numpy as jnp
-    from sppcax.models.factor_analysis import PPCA
+    from sppcax.models import PFA
     from sppcax.bmr.delta_f import compute_delta_f
 
     # Fit a model
-    model = PPCA(n_components=5, n_features=20)
-    data = jnp.ones((100, 20))
-    model, _ = model.fit(data)
-
-    # Compute delta F for each parameter in the loading matrix
-    delta_f_values = compute_delta_f(
-        posterior=model.W_dist,  # Posterior distribution
-        prior=model.W_dist.__class__(  # Prior distribution
-            loc=jnp.zeros_like(model.W_dist.mvn.mean),
-            mask=model.W_dist.mask,
-            alpha=model.W_dist.gamma.alpha0,
-            beta=model.W_dist.gamma.beta0
-        )
+    model = PPCA(
+        n_components=5,
+        n_features=20,
+        optimize_with_bmr=True,
+        bmr_e_step=True,
+        bmr_m_step=True,
+        bmr_e_step_opts=('max_iter', 2, 'pi', 0.2)
     )
-
-    # Parameters with large positive delta F are candidates for pruning
-    # This would typically be followed by updating the model with the pruned parameters
+    # optimize_with_bmr controls Empirical Bayes like hyperparameter optimization
+    # bmr_e_step controls BMR during VBE-step, where the posterior over latents is pruned
+    # bmr_m_step controls BMR during VBM-step, where the posterior over loading matrix elements is pruned.
+    data = jnp.ones((100, 20))
+    key, _key = jr.split(key)
+    fitted_model, elbos = fit(model, data, n_iter=256, bmr_frequency=16, key=_key)
+    # bmr_frequency specifies the frequency of BMR pruning during the VBM-step, here
+    # the pruning is performed every 16 steps.
 
 Advanced Usage
 ==============
 
-For more advanced usage, including custom priors, mixed likelihood models, and integration with other JAX-based libraries, please refer to the API documentation.
+For more advanced usage please refer to jupyter notebooks provided in examples directory.
