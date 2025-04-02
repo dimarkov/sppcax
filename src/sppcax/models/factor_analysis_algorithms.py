@@ -43,7 +43,8 @@ def e_step(
         X: Data matrix of shape (n_samples, n_features) or Distribution instance
         use_data_mask: apply data mask (default True)
         use_bmr: apply Bayesian Model Reduction (default False)
-        key: random number generator key
+        key: A `jax.random.PRNGKey` used to provide randomness for parameter
+            initialisation.
 
     Returns:
         qz: Posterior distribution over latents z in the form of a MultivariateNormal distribution
@@ -93,7 +94,7 @@ def m_step(
         model: BayesianFactorAnalysis model parameters
         X: Data matrix of shape (n_samples, n_features) or Distribution instance
         qz: Posterior estimates of latent states obtained during the variational e-step (n_samples, n_components)
-        use_bmr: Whether to apply Bayesian Model Reduction
+        use_bmr: Whether to apply Bayesian Model Reduction based optimisation for q(tau) and q(psi)
 
     Returns:
         Updated model instance
@@ -176,7 +177,8 @@ def fit(
         n_iter: Maximum number of iterations
         tol: Convergence tolerance
         bmr_frequency: Apply BMR every N M-steps
-        key: Random number generator key
+        key: A `jax.random.PRNGKey` used to provide randomness for parameter
+            initialisation.
 
     Returns:
         model: Fitted model instance
@@ -221,7 +223,7 @@ def transform(
     model: BayesianFactorAnalysisParams,
     X: Union[Matrix, Distribution],
     use_data_mask: bool = False,
-    use_bmr: bool = False,
+    *,
     key: PRNGKey = None,
 ) -> MultivariateNormal:
     """Apply dimensionality reduction to X.
@@ -231,12 +233,13 @@ def transform(
         X: Data matrix of shape (n_samples, n_features) or Distribution instance
         use_data_mask: apply data mask (default False)
         use_bmr: apply Bayesian Model Reduction (default False)
-        key: Random number generator key
+        key: A `jax.random.PRNGKey` used to provide randomness for parameter
+            initialisation. (Keyword only argument.)
 
     Returns:
         qz: Posterior estimate of the latents as MultivariateNormal distribution
     """
-    return e_step(model, X, use_data_mask=use_data_mask, use_bmr=use_bmr, key=key)
+    return e_step(model, X, use_data_mask=use_data_mask, use_bmr=model.bmr_m_step.use, key=key)
 
 
 def inverse_transform(model: BayesianFactorAnalysisParams, Z: Union[Array, Distribution]) -> MultivariateNormal:
