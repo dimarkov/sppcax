@@ -1,0 +1,144 @@
+"""Tests for Mixed Likelihood VBPCA model."""
+
+import pytest
+import jax.numpy as jnp
+import jax.random as jr
+
+from sppcax.models import MixedLikelihoodVBPCA
+
+
+@pytest.fixture
+def mixed_data():
+    """Create synthetic dataset with mixed types."""
+    key = jr.PRNGKey(0)
+
+    # Generate latent variables
+    n_samples = 100
+    n_components = 2
+    Z = jr.normal(key, (n_samples, n_components))
+
+    # Generate loading matrices
+    key, subkey = jr.split(key)
+    W_continuous = jr.normal(subkey, (2, n_components))
+    key, subkey = jr.split(key)
+    W_binary = jr.normal(subkey, (2, n_components))
+
+    # Generate observations
+    X_continuous = jnp.dot(Z, W_continuous.T)
+    X_binary = jnp.sigmoid(jnp.dot(Z, W_binary.T))
+    X_binary = (X_binary > 0.5).astype(jnp.float32)
+
+    # Combine features
+    X = jnp.concatenate([X_continuous, X_binary], axis=1)
+
+    return X
+
+
+def test_mixed_likelihood_vbpca_init():
+    """Test model initialization."""
+    feature_types = {
+        'normal': [0, 1],
+        'bernoulli': [2, 3]
+    }
+
+    model = MixedLikelihoodVBPCA(
+        n_components=2,
+        feature_types=feature_types
+    )
+
+    assert model.n_components == 2
+    assert model.feature_types == feature_types
+    assert len(model.likelihoods) == 4
+
+
+def test_mixed_likelihood_vbpca_fit(mixed_data):
+    """Test model fitting."""
+    feature_types = {
+        'normal': [0, 1],
+        'bernoulli': [2, 3]
+    }
+
+    model = MixedLikelihoodVBPCA(
+        n_components=2,
+        feature_types=feature_types,
+        random_state=jr.PRNGKey(0)
+    )
+
+    # Fit model
+    model.fit(mixed_data)
+
+    # Check shapes of learned parameters
+    assert model.W_.mean.shape == (4, 2)
+    assert model.z_.mean.shape == (100, 2)
+
+
+def test_mixed_likelihood_vbpca_transform(mixed_data):
+    """Test data transformation."""
+    feature_types = {
+        'normal': [0, 1],
+        'bernoulli': [2, 3]
+    }
+
+    model = MixedLikelihoodVBPCA(
+        n_components=2,
+        feature_types=feature_types,
+        random_state=jr.PRNGKey(0)
+    )
+
+    # Fit and transform
+    model.fit(mixed_data)
+    Z = model.transform(mixed_data)
+
+    assert Z.shape == (100, 2)
+
+
+def test_mixed_likelihood_vbpca_inverse_transform(mixed_data):
+    """Test inverse transformation."""
+    feature_types = {
+        'normal': [0, 1],
+        'bernoulli': [2, 3]
+    }
+
+    model = MixedLikelihoodVBPCA(
+        n_components=2,
+        feature_types=feature_types,
+        random_state=jr.PRNGKey(0)
+    )
+
+    # Fit, transform, and inverse transform
+    model.fit(mixed_data)
+    Z = model.transform(mixed_data)
+    X_rec = model.inverse_transform(Z)
+
+    # Check reconstructions
+    assert 'normal' in X_rec
+    assert 'bernoulli' in X_rec
+    assert X_rec['normal'].shape == (100, 2)
+    assert X_rec['bernoulli'].shape == (100, 2)
+    assert jnp.all((X_rec['bernoulli'] >= 0) & (X_rec['bernoulli'] <= 1))
+
+
+def test_mixed_likelihood_vbpca_elbo(mixed_data):
+    """Test ELBO computation and convergence."""
+    feature_types = {
+        'normal': [0, 1],
+        'bernoulli': [2, 3]
+    }
+
+    model = MixedLikelihoodVBPCA(
+        n_components=2,
+        feature_types=feature_types,
+        random_state=jr.PRNGKey(0)
+    )
+
+    # Compute initial ELBO
+    initial_elbo = model._compute_elbo(mixed_data)
+
+    # Fit model
+    model.fit(mixed_data)
+
+    # Compute final ELBO
+    final_elbo = model._compute_elbo(mixed_data)
+
+    # ELBO should increase during training
+    assert final_elbo > initial_elbo
