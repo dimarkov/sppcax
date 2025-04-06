@@ -34,8 +34,8 @@ def reduce_model(model: PFA, *, key: PRNGKey, max_iter: int = 4) -> PFA:
         key, _key = jr.split(key)
         delta_f, lam = gibbs_sampler_pfa(_key, model, pi, lam, delta_f)
 
-        dnat1 = lam.sum() * jnp.ones(())
-        dnat2 = (1 - lam).sum() * jnp.ones(())
+        dnat1 = lam.astype(delta_f.dtype).sum(0)
+        dnat2 = (1 - lam).astype(delta_f.dtype).sum(0)
         sparsity_post = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), sparsity_post, (dnat1, dnat2))
 
         return (delta_f, sparsity_post, lam, key), delta_f
@@ -49,10 +49,10 @@ def reduce_model(model: PFA, *, key: PRNGKey, max_iter: int = 4) -> PFA:
     tau = eqx.tree_at(lambda x: x.dnat1, model.W_dist.gamma, dnat1)
     W_dist = eqx.tree_at(lambda x: (x.mvn, x.gamma), model.W_dist, (mvn_W, tau))
 
-    dnat2 = model.noise_precision.dnat2  # TODO: add BMR correction to beta values
+    dnat2 = model.noise_precision.dnat2
     pruned = model.W_dist.mvn.mask.astype(jnp.int8) - lam
     tilde_mu = pruned * model.W_dist.mvn.mean
-    dnat2 += 0.5 * (tilde_mu[..., None, :] @ (model.W_dist.mvn.covariance @ tilde_mu[..., None])).sum()
+    dnat2 -= 0.5 * (tilde_mu[..., None, :] @ (model.W_dist.mvn.covariance @ tilde_mu[..., None])).squeeze((-1, -2))
     noise_precision = eqx.tree_at(lambda x: x.dnat2, model.noise_precision, dnat2)
     model = eqx.tree_at(
         lambda x: (x.W_dist, x.sparsity_prior, x.noise_precision),
@@ -88,13 +88,14 @@ def reduce_model(  # noqa: F811
         key, _key = jr.split(key)
         delta_f, lam = gibbs_sampler_mvn(_key, model, pi, lam, delta_f)
 
-        dnat1 = lam.sum() * jnp.ones(())
-        dnat2 = (1 - lam).sum() * jnp.ones(())
+        dnat1 = lam.astype(delta_f.dtype).sum(0)
+        dnat2 = (1 - lam).astype(delta_f.dtype).sum(0)
         sparsity_dist = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), sparsity_dist, (dnat1, dnat2))
 
         return (delta_f, sparsity_dist, lam, key), delta_f
 
-    sparity_prior = Beta(10 * pi, 10 * (1 - pi))
+    K = model.mask.shape[-1]
+    sparity_prior = Beta(10 * pi * jnp.ones(K), 10 * (1 - pi) * jnp.ones(K))
     init = (jnp.zeros(model.batch_shape), sparity_prior, model.mask, key)
     (_, _, lam, key), _ = lax.scan(step_fn, init, jnp.arange(max_iter))
 

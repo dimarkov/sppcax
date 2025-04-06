@@ -93,7 +93,7 @@ class BayesianFactorAnalysisParams(eqx.Module):
         beta = 1
         self.W_dist = MultivariateNormalGamma(loc=loc, mask=mask, alpha=alpha, beta=beta)
 
-        self.sparsity_prior = Beta(alpha0=1.0, beta0=1.0)
+        self.sparsity_prior = Beta(alpha0=jnp.ones(self.n_components), beta0=jnp.ones(self.n_components))
 
         # Initialize noise precision
         if self.isotropic_noise:

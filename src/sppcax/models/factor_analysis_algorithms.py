@@ -128,27 +128,29 @@ def m_step(
     dnat2 -= 0.5 * (sigma_sqr_w + jnp.square(W)) @ tau
     dnat2 -= 0.5 * sigma_sqr_x
 
-    nat2_0 = dnat2 * (model.noise_precision.nat1_0 + 1) / dnat1 if use_bmr else None
-
     if model.isotropic_noise:
         # Single precision for all features
         dnat1 = jnp.sum(dnat1)
         dnat2 = jnp.sum(dnat2)
-        nat2_0 = jnp.sum(nat2_0) if use_bmr else None
 
-    if use_bmr:
-        gamma_np = eqx.tree_at(lambda x: (x.dnat1, x.dnat2, x.nat2_0), model.noise_precision, (dnat1, dnat2, nat2_0))
-    else:
-        gamma_np = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), model.noise_precision, (dnat1, dnat2))
+    gamma_np = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), model.noise_precision, (dnat1, dnat2))
 
     # update tau
     dnat1 = mvn.mask.sum(0) / 2
     dnat2 = -0.5 * jnp.sum(sigma_sqr_w + gamma_np.mean[..., None] * jnp.square(W), 0)
-    nat2_0 = dnat2 * (model.W_dist.gamma.nat1_0 + 1)
-    nat2_0 = jnp.where(dnat1 > 0, nat2_0 / dnat1, model.W_dist.gamma.nat2_0)
+
+    gamma_tau = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), model.W_dist.gamma, (dnat1, dnat2))
+
+    if use_bmr:
+        # BMR optimisation of gamma priors
+        nat2_0 = gamma_tau.dnat2 * (gamma_tau.nat1_0 + 1)
+        nat2_0 = jnp.where(gamma_tau.dnat1 > 0, nat2_0 / gamma_tau.dnat1, gamma_tau.nat2_0)
+        gamma_tau = eqx.tree_at(lambda x: x.nat2_0, gamma_tau, nat2_0)
+
+        nat2_0 = gamma_np.dnat2 * (gamma_np.nat1_0 + 1) / (gamma_np.dnat1 + 1e-8)
+        gamma_np = eqx.tree_at(lambda x: x.nat2_0, gamma_np, nat2_0)
 
     # Create new W distribution
-    gamma_tau = eqx.tree_at(lambda x: (x.dnat1, x.dnat2, x.nat2_0), model.W_dist.gamma, (dnat1, dnat2, nat2_0))
     new_W_dist = eqx.tree_at(lambda x: (x.mvn, x.gamma), model.W_dist, (mvn, gamma_tau))
 
     # Update model with posterior distributions
@@ -204,7 +206,8 @@ def fit(
         elbos.append(elbo_val)
 
         # M-step (returns updated model)
-        updated_model = eqx.filter_jit(m_step)(updated_model, X_dist, qz, use_bmr=updated_model.optimize_with_bmr)
+        # updated_model = eqx.filter_jit(m_step)(updated_model, X_dist, qz, use_bmr=updated_model.optimize_with_bmr)
+        updated_model = m_step(updated_model, X_dist, qz, use_bmr=updated_model.optimize_with_bmr)
 
         # Apply Bayesian Model Reduction if enabled
         if updated_model.bmr_m_step.use and ((n + 1) % bmr_frequency == 0):

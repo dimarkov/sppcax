@@ -16,8 +16,8 @@ class Distribution(eqx.Module):
         event_shape: Shape of event dimensions.
     """
 
-    batch_shape: Shape
-    event_shape: Shape
+    batch_shape: Shape = eqx.field(static=True)
+    event_shape: Shape = eqx.field(static=True)
 
     def __init__(self, batch_shape, event_shape):
         """Initialize distribution with empty shapes."""

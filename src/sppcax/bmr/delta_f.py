@@ -70,7 +70,7 @@ def gibbs_sampler_pfa(key: PRNGKey, model: PFA, pi: Scalar, lam: Matrix, delta_f
         tmp = delta_f_d - delta_f
         delta_f_d_iim1 = jnp.where(_lam_k == 1, -tmp, tmp)
 
-        p = nn.sigmoid(delta_f_d_iim1 + eta)
+        p = nn.sigmoid(delta_f_d_iim1 + eta[k])
         key, _key = jr.split(key)
         lam_k = jr.bernoulli(key, p=p) * mask[:, k]
         lam = lam.at[:, k].set(lam_k)
@@ -131,7 +131,7 @@ def gibbs_sampler_mvn(
         tmp = delta_f_d - delta_f
         delta_f_d_iim1 = jnp.where(_lam_k == 1, -tmp, tmp)
 
-        p = nn.sigmoid(delta_f_d_iim1 + eta)
+        p = nn.sigmoid(delta_f_d_iim1 + eta[k])
         key, _key = jr.split(key)
         lam_k = jr.bernoulli(key, p=p) * mask[:, k]
         lam = lam.at[:, k].set(lam_k)
