@@ -115,7 +115,7 @@ class MultivariateNormal(ExponentialFamily):
         mask_mat = self.mask[..., None] * self.mask[..., None, :]
 
         if zeromask:
-            return jnp.where(mask_mat, x, jnp.zeros((x.shape[-1], x.shape[-1])))
+            return jnp.where(mask_mat, x, 0.0)
         else:
             return jnp.where(mask_mat, x, jnp.eye(x.shape[-1]))
 
