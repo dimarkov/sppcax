@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 import jax.numpy as jnp
 import jax.random as jr
 import jax.scipy.special as jsp
+import equinox as eqx
 
 from ..types import Array, PRNGKey, Shape
 from .exponential_family import ExponentialFamily
@@ -33,9 +34,11 @@ class MultivariateNormalGamma(ExponentialFamily):
     def __init__(
         self,
         loc: Array,
+        *,
+        isotropic_noise,
         mask: Optional[Array] = None,
-        alpha: float = 2.0,
-        beta: float = 1.0,
+        alpha0: float = 2.0,
+        beta0: float = 1.0,
         scale_tril: Optional[Array] = None,
         covariance: Optional[Array] = None,
         precision: Optional[Array] = None,
@@ -61,7 +64,12 @@ class MultivariateNormalGamma(ExponentialFamily):
         )
 
         # Initialize Gamma parameters
-        self.gamma = Gamma(alpha0=alpha * jnp.ones(self.mvn.event_shape), beta0=beta * jnp.ones(self.mvn.event_shape))
+        if isotropic_noise:
+            self.gamma = Gamma(alpha0=alpha0, beta0=beta0)
+        else:
+            self.gamma = Gamma(
+                alpha0=alpha0 * jnp.ones(self.mvn.batch_shape), beta0=beta0 * jnp.ones(self.mvn.batch_shape)
+            )
 
         # Set shapes from MVN-Gamma
         super().__init__(batch_shape=self.mvn.batch_shape, event_shape=self.mvn.event_shape)
@@ -70,22 +78,23 @@ class MultivariateNormalGamma(ExponentialFamily):
         """Compute log probability.
 
         Args:
-            x: Tuple of (value, tau) where:
-                value: Value to compute probability for
-                tau: Precision scalar
+            x: Tuple of (w, psi) where:
+                w: Value to compute probability for
+                psi: Precision scalar
 
         Returns:
             Log probability
         """
-        value, tau = x
+        w, psi = x
 
-        # MVN term: p(x|τ)
-        # Scale precision matrix by tau
-        mvn_log_prob = self.mvn.log_prob(value)
-        mvn_log_prob = mvn_log_prob + 0.5 * jnp.sum(self.mvn.mask, -1) * jnp.log(tau)
+        # MVN term: p(w|psi)
+        sqrt_psi = jnp.sqrt(psi)
+        mvn = eqx.tree_at(lambda x: x.nat1, self.mvn, self.mvn.nat1 * sqrt_psi[..., None])
+        mvn_log_prob = mvn.log_prob(w * sqrt_psi[..., None])
+        mvn_log_prob = mvn_log_prob + 0.5 * jnp.sum(self.mvn.mask, -1) * jnp.log(psi)
 
-        # Gamma term: p(τ)
-        gamma_log_prob = self.gamma.log_prob(tau)
+        # Gamma term: p(psi)
+        gamma_log_prob = self.gamma.log_prob(psi)
 
         return mvn_log_prob + gamma_log_prob
 
@@ -99,17 +108,19 @@ class MultivariateNormalGamma(ExponentialFamily):
         Returns:
             Tuple of (value, tau) samples
         """
-        key_tau, key_mvn = jr.split(key)
+        key_psi, key_mvn = jr.split(key)
 
-        # Sample tau ~ Gamma(α, β)
-        tau = self.gamma.sample(key_tau, sample_shape=sample_shape)
+        # Sample psi ~ Gamma(α, β)
+        psi = self.gamma.sample(key_psi, sample_shape=sample_shape)
+        sqrt_psi = jnp.sqrt(psi)
 
-        # Sample x|tau ~ MVN(μ, (τΛ)⁻¹)
-        # We can sample from base MVN and scale by sqrt(tau)
-        value = self.mvn.sample(key_mvn, sample_shape=sample_shape)
-        value = value / jnp.sqrt(tau)
+        # Sample x|psi ~ MVN(μ, (psiΛ)⁻¹)
+        # We can sample from base MVN and scale by sqrt(psi)
+        mvn = eqx.tree_at(lambda x: x.nat1, self.mvn, self.mvn.nat1 * sqrt_psi[..., None])
+        value = mvn.sample(key_mvn, sample_shape=sample_shape)
+        value = value / sqrt_psi[..., None]
 
-        return value, tau
+        return value, psi
 
     @property
     def mean(self) -> Array:
@@ -118,45 +129,22 @@ class MultivariateNormalGamma(ExponentialFamily):
 
     @property
     def expected_covariance(self) -> Array:
-        return self.mvn.covariance * (self.gamma.beta / (self.gamma.alpha - 1))[..., None]
+        # mean of the inverse of precision (variance)
+        exp_variance = jnp.broadcast_to(self.gamma.beta / (self.gamma.alpha - 1), self.batch_shape)
+        return self.mvn.covariance * exp_variance[..., None, None]
 
     @property
-    def expected_precision(self) -> Array:
-        """Compute expected precision E[τ]."""
-        return self.gamma.mean
+    def expected_psi(self) -> Array:
+        """Compute expected precision E[psi]."""
+        return jnp.broadcast_to(self.gamma.mean, self.batch_shape)
 
     @property
-    def expected_log_precision(self) -> Array:
-        """Compute expected log precision E[log(τ)]."""
-        return jsp.digamma(self.gamma.alpha) - jnp.log(self.gamma.beta)
+    def expected_log_psi(self) -> Array:
+        """Compute expected log precision E[log(psi)]."""
+        return jnp.broadcast_to(jsp.digamma(self.gamma.alpha) - jnp.log(self.gamma.beta), self.batch_shape)
 
     @property
-    def kl_divergence_from_prior(self) -> Array:
-        """Compute KL divergence KL(post||prior).
-
-        Returns:
-            KL divergence KL(post||prior) with shape: batch_shape
-        """
-        kl_div_gamma = (self.gamma.kl_divergence_from_prior * self.mvn.mask).sum(-1)
-        exp_tau = self.gamma.mean
-
-        eta_self = self.mvn.natural_parameters
-        other = MultivariateNormal(loc=jnp.zeros_like(self.mvn.nat1), mask=self.mvn.mask)
-        eta_other = other.natural_parameters
-
-        E_x = self.mvn.mean
-        cov = self.mvn.covariance
-
-        mean_outer = (exp_tau * E_x)[..., None] * E_x[..., None, :]
-        E_xx = mean_outer + cov
-
-        expected_T = jnp.concatenate([exp_tau * E_x, E_xx.reshape(*E_x.shape[:-1], -1)], axis=-1)
-
-        # Sum over natural parameter dimensions
-        inner_product = jnp.sum(
-            (eta_self - eta_other) * expected_T, axis=tuple(range(-len(self.mvn.natural_param_shape), 0))
-        )
-
-        kl_div_mvn = -self.mvn.log_normalizer + other.log_normalizer + inner_product
-
-        return kl_div_gamma + kl_div_mvn
+    def expected_sufficient_statistics_psi(self) -> Array:
+        """Compute expected sufficient statistics of psi."""
+        suff_stats = self.gamma.expected_sufficient_statistics
+        return jnp.broadcast_to(suff_stats, self.batch_shape + (2,))

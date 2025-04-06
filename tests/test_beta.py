@@ -2,6 +2,7 @@
 
 import jax.numpy as jnp
 import jax.random as jr
+from jax.scipy.special import gammaln
 from sppcax.distributions import Beta
 
 
@@ -67,7 +68,7 @@ def test_beta_log_prob():
     expected_log_prob = (
         (alpha - 1) * jnp.log(x)
         + (beta - 1) * jnp.log(1 - x)
-        - jnp.log(jnp.exp(jnp.math.lgamma(alpha) + jnp.math.lgamma(beta) - jnp.math.lgamma(alpha + beta)))
+        - jnp.log(jnp.exp(gammaln(alpha) + gammaln(beta) - gammaln(alpha + beta)))
     )
     assert jnp.allclose(log_prob, expected_log_prob)
 

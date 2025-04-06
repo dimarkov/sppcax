@@ -40,24 +40,38 @@ def reduce_model(model: PFA, *, key: PRNGKey, max_iter: int = 4) -> PFA:
 
         return (delta_f, sparsity_post, lam, key), delta_f
 
-    init = (jnp.zeros(model.n_features), model.sparsity_prior, model.W_dist.mvn.mask, key)
+    # Initialize state for scan
+    init = (jnp.zeros(model.n_features), model.sparsity_prior, model.q_w_psi.mvn.mask, key)
     (last_df, sparsity_post, lam, key), delta_fs = lax.scan(step_fn, init, jnp.arange(max_iter))
 
-    # Update the model
-    mvn_W = eqx.tree_at(lambda x: x.mask, model.W_dist.mvn, lam)  # update the mask of the loading matrix
-    dnat1 = lam.sum(0) / 2
-    tau = eqx.tree_at(lambda x: x.dnat1, model.W_dist.gamma, dnat1)
-    W_dist = eqx.tree_at(lambda x: (x.mvn, x.gamma), model.W_dist, (mvn_W, tau))
+    # --- Update model components based on BMR results ---
 
-    dnat2 = model.noise_precision.dnat2
-    pruned = model.W_dist.mvn.mask.astype(jnp.int8) - lam
-    tilde_mu = pruned * model.W_dist.mvn.mean
-    dnat2 -= 0.5 * (tilde_mu[..., None, :] @ (model.W_dist.mvn.covariance @ tilde_mu[..., None])).squeeze((-1, -2))
-    noise_precision = eqx.tree_at(lambda x: x.dnat2, model.noise_precision, dnat2)
+    # Update q(W|psi) mask
+    updated_mvn = eqx.tree_at(lambda x: x.mask, model.q_w_psi.mvn, lam)
+
+    # Update q(tau) shape parameter based on new mask
+    dnat1_tau = lam.sum(0) / 2
+    updated_q_tau = eqx.tree_at(lambda x: x.dnat1, model.q_tau, dnat1_tau)
+
+    # Update q(psi) rate parameter based on pruned components
+    dnat2_psi = model.q_w_psi.gamma.dnat2  # Start with original rate parameter
+    pruned_mask_diff = (
+        model.q_w_psi.mvn.mask.astype(jnp.int8) - lam
+    )  # Identify pruned elements (1 where pruned, 0 otherwise)
+    tilde_mu = pruned_mask_diff * model.q_w_psi.mvn.mean  # Get means of pruned elements
+
+    # Adjust rate parameter by removing contribution of pruned elements' variance
+    dnat2_psi -= 0.5 * (tilde_mu[..., None, :] @ (model.q_w_psi.mvn.covariance @ tilde_mu[..., None])).squeeze((-1, -2))
+    updated_q_psi = eqx.tree_at(lambda x: x.dnat2, model.q_w_psi.gamma, dnat2_psi)
+
+    # Combine updated mvn and psi into q_w_psi
+    updated_q_w_psi = eqx.tree_at(lambda x: (x.mvn, x.gamma), model.q_w_psi, (updated_mvn, updated_q_psi))
+
+    # Update the final model state
     model = eqx.tree_at(
-        lambda x: (x.W_dist, x.sparsity_prior, x.noise_precision),
+        lambda x: (x.q_w_psi, x.sparsity_prior, x.q_tau),
         model,
-        (W_dist, sparsity_post, noise_precision),
+        (updated_q_w_psi, sparsity_post, updated_q_tau),
     )
 
     return model
@@ -106,13 +120,46 @@ def reduce_model(  # noqa: F811
 
 
 def remove_redundant_latents(model: BayesianFactorAnalysisParams) -> BayesianFactorAnalysisParams:
-    """Remove redundant latent variables from the model."""
-    remaining_components = jnp.nonzero(model.W_dist.mvn.mask.sum(0) > 0)
+    """Remove redundant latent variables (columns) from the model based on q_w_psi mask."""
+    # Find components (columns) where at least one feature weight is active
+    remaining_components_idx = jnp.nonzero(model.q_w_psi.mvn.mask.sum(0) > 0)[0]  # Get indices
 
-    alpha = model.W_dist.gamma.alpha[remaining_components]
-    beta = model.W_dist.gamma.beta[remaining_components]
-    gamma = Gamma(alpha, beta)
+    # Prune q_tau (ARD prior precision)
+    alpha_tau = model.q_tau.alpha0[
+        remaining_components_idx
+    ]  # Assuming alpha0/beta0 are priors, dnat1/dnat2 are updates
+    beta_tau = model.q_tau.beta0[remaining_components_idx]
+    dnat1_tau = model.q_tau.dnat1[remaining_components_idx]
+    dnat2_tau = model.q_tau.dnat2[remaining_components_idx]
+    # Recreate q_tau with pruned parameters
+    pruned_q_tau = Gamma(alpha0=alpha_tau, beta0=beta_tau)
+    pruned_q_tau = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), pruned_q_tau, (dnat1_tau, dnat2_tau))
 
-    W_dist = eqx.tree_at(lambda x: x.gamma, model.W_dist, gamma)
-    model = eqx.tree_at(lambda x: x.W_dist, model, W_dist)
+    # Prune q_w_psi (MVN part) - select columns corresponding to remaining components
+    # This requires careful handling of MultivariateNormalGamma structure
+    # Assuming loc, mask, covariance etc. can be indexed along the component dimension (last dim for mean/loc, last two for cov)
+    pruned_mvn_loc = model.q_w_psi.mvn.loc[:, remaining_components_idx]
+    pruned_mvn_mask = model.q_w_psi.mvn.mask[:, remaining_components_idx]
+    # Covariance pruning is tricky. Assuming diagonal/block structure allows simple selection.
+    # If cov has shape (Features, K, K), select blocks along last two dims.
+    # If cov has shape (Features * K, Features * K), it's more complex.
+    # Assuming (Features, K, K) structure for simplicity:
+    # TODO: Verify covariance structure and pruning logic in MultivariateNormalGamma
+    pruned_mvn_cov = model.q_w_psi.mvn.covariance[:, remaining_components_idx][:, :, remaining_components_idx]
+    # Recreate the MVN part - need to handle precision/nat params if used internally
+    # This assumes MultivariateNormalGamma can be reconstructed this way.
+    pruned_mvn = eqx.tree_at(lambda x: x.loc, model.q_w_psi.mvn, pruned_mvn_loc)
+    pruned_mvn = eqx.tree_at(lambda x: x.mask, pruned_mvn, pruned_mvn_mask)
+    pruned_mvn = eqx.tree_at(lambda x: x.covariance, pruned_mvn, pruned_mvn_cov)
+    # Need to update precision/nat params based on new cov/loc if necessary
+
+    # Combine pruned MVN with original Gamma (psi) part
+    pruned_q_w_psi = eqx.tree_at(lambda x: x.mvn, model.q_w_psi, pruned_mvn)
+
+    # Update model with pruned components
+    model = eqx.tree_at(lambda x: x.q_w_psi, model, pruned_q_w_psi)
+    model = eqx.tree_at(lambda x: x.q_tau, model, pruned_q_tau)
+    # Update n_components count
+    model = eqx.tree_at(lambda x: x.n_components, model, len(remaining_components_idx))
+
     return model

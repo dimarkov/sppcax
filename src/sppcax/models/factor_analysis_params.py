@@ -31,8 +31,8 @@ class BayesianFactorAnalysisParams(eqx.Module):
     n_components: int
     n_features: int
     isotropic_noise: bool
-    W_dist: MultivariateNormalGamma  # batched over features
-    noise_precision: Gamma  # Single precision for PPCA or per-feature for FA
+    q_w_psi: MultivariateNormalGamma  # Posterior over W (mvn) and psi (gamma), batched over features
+    q_tau: Gamma  # Posterior over tau (ARD prior precision), batched over components
     sparsity_prior: Beta  # Prior over sparsity probaility
     mean_: Array  # Data mean for centering
     optimize_with_bmr: bool  # Whether to apply Bayesian Model Reduction optimization for tau and psi at every step
@@ -83,25 +83,24 @@ class BayesianFactorAnalysisParams(eqx.Module):
 
     def _init_params(self, key: PRNGKey) -> None:
         """Initialize model parameters."""
+        key_w, key_psi, key_tau = jr.split(key, 3)
 
-        # Initialize loading matrix columns
-        loc = jr.normal(key, (self.n_features, self.n_components)) * 0.01
+        # Initialize q(W|psi) - MVN part
+        loc = jr.normal(key_w, (self.n_features, self.n_components)) * 0.01
         mask = jnp.clip(jnp.arange(self.n_features), max=self.n_components)[..., None] >= jnp.arange(self.n_components)
 
-        # set initial alpha to the value of the posterior
-        alpha = 1
-        beta = 1
-        self.W_dist = MultivariateNormalGamma(loc=loc, mask=mask, alpha=alpha, beta=beta)
+        # Initialize q(W, psi) - join posterior over the loading matrix, W, and noise precision, psi
+        self.q_w_psi = MultivariateNormalGamma(
+            loc=loc, mask=mask, alpha0=2.0, beta0=1.0, isotropic_noise=self.isotropic_noise
+        )
 
+        # Initialize q(tau) - ARD prior
+        alpha_tau = 0.5
+        beta_tau = 0.5
+        self.q_tau = Gamma(alpha0=alpha_tau * jnp.ones(self.n_components), beta0=beta_tau * jnp.ones(self.n_components))
+
+        # Initialize sparsity prior
         self.sparsity_prior = Beta(alpha0=jnp.ones(self.n_components), beta0=jnp.ones(self.n_components))
-
-        # Initialize noise precision
-        if self.isotropic_noise:
-            # Single precision for all features (PPCA)
-            self.noise_precision = Gamma(alpha0=2.0, beta0=1.0)
-        else:
-            # Per-feature precision (FA)
-            self.noise_precision = Gamma(alpha0=2 * jnp.ones(self.n_features), beta0=jnp.ones(self.n_features))
 
     def _validate_mask(self, X: Array) -> Array:
         """Validate and process the data mask.

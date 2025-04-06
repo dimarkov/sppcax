@@ -44,9 +44,10 @@ def gibbs_sampler_pfa(key: PRNGKey, model: PFA, pi: Scalar, lam: Matrix, delta_f
         A tuple of new delta F values for each dimension d, and a new sparsity matrix
     """
 
-    # MultivariateNormal-Gamma posterior q(W, \rho, \tau)
-    posterior = model.W_dist
-    rho = model.noise_precision
+    # Posterior distributions q(W, psi) and q(tau)
+    posterior = model.q_w_psi  # This is MultivariateNormalGamma q(W, psi)
+    rho = posterior.gamma  # This is Gamma q(psi)
+    q_tau = model.q_tau
 
     # Extract parameters
     mask = posterior.mvn.mask  # initial mask over loading matrix
@@ -62,7 +63,7 @@ def gibbs_sampler_pfa(key: PRNGKey, model: PFA, pi: Scalar, lam: Matrix, delta_f
         lam = mask * lam.at[:, k].set(~_lam_k)
         pruned = mask.astype(jnp.int8) - lam
         r = pruned.sum(0)
-        ln_c_d = ln_c(posterior.gamma.alpha, posterior.gamma.beta, r).sum() / D
+        ln_c_d = ln_c(q_tau.alpha, q_tau.beta, r).sum() / D
         delta_f_d = vmap(compute_delta_f, in_axes=(0, 0, 0, 0, 0, None))(
             pruned, lm_mean, lm_prec, rho.alpha, rho.beta, ln_c_d
         )
