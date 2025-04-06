@@ -238,6 +238,7 @@ def transform(
     model: BayesianFactorAnalysisParams,
     X: Union[Matrix, Distribution],
     use_data_mask: bool = False,
+    use_bmr: bool = False,
     *,
     key: PRNGKey = None,
 ) -> MultivariateNormal:
@@ -254,7 +255,7 @@ def transform(
     Returns:
         qz: Posterior estimate of the latents as MultivariateNormal distribution
     """
-    return e_step(model, X, use_data_mask=use_data_mask, use_bmr=model.bmr_m_step.use, key=key)
+    return e_step(model, X, use_data_mask=use_data_mask, use_bmr=use_bmr, key=key)
 
 
 def inverse_transform(model: BayesianFactorAnalysisParams, Z: Union[Array, Distribution]) -> MultivariateNormal:
