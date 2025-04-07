@@ -114,7 +114,7 @@ def m_step(
     # Update MVN part (q(W | psi))
     exp_tau = model.q_tau.mean  # Expected precision from ARD prior
     P_w = jnp.diag(exp_tau) + Ezz
-    nat1_w = jnp.sum(Ez[..., None, :] * X_centered[..., None], axis=0)
+    nat1_w = jnp.where(model.q_w_psi.mvn.mask, jnp.sum(Ez[..., None, :] * X_centered[..., None], axis=0), 0.0)
     updated_mvn = eqx.tree_at(lambda x: (x.nat1, x.nat2), model.q_w_psi.mvn, (nat1_w, -0.5 * P_w))
     W = updated_mvn.mean
     sigma_sqr_w = jnp.diagonal(updated_mvn.covariance, axis1=-1, axis2=-2)
@@ -143,7 +143,7 @@ def m_step(
     updated_q_psi = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), model.q_w_psi.gamma, (dnat1_psi, dnat2_psi))
 
     # --- Update q(tau) --- ARD prior precision
-    dnat1_tau = updated_mvn.mask.sum(0) / 2  # Shape parameter update depends on effective features per component
+    dnat1_tau = 0.5 * updated_mvn.mask.sum(0)  # Shape parameter update depends on effective features per component
     # Rate parameter update depends on expected squared loadings scaled by noise precision
     exp_psi = updated_q_psi.mean  # Expected noise precision
 
@@ -154,11 +154,11 @@ def m_step(
         # BMR optimisation of gamma prior hyper-parameters
         # Update q_tau prior rate (beta0)
         nat2_0_tau = updated_q_tau.dnat2 * (updated_q_tau.nat1_0 + 1)
-        nat2_0_tau = jnp.where(updated_q_tau.dnat1 > 0, nat2_0_tau / updated_q_tau.dnat1, updated_q_tau.nat2_0)
+        nat2_0_tau = jnp.where(updated_q_tau.dnat1 > 0, nat2_0_tau / updated_q_tau.dnat1, -1e-4)
         updated_q_tau = eqx.tree_at(lambda x: x.nat2_0, updated_q_tau, nat2_0_tau)
 
         # Update q_psi prior rate (beta0)
-        nat2_0_psi = updated_q_psi.dnat2 * (updated_q_psi.nat1_0 + 1) / (updated_q_psi.dnat1 + 1e-8)
+        nat2_0_psi = updated_q_psi.dnat2 * (updated_q_psi.nat1_0 + 1) / updated_q_psi.dnat1
         updated_q_psi = eqx.tree_at(lambda x: x.nat2_0, updated_q_psi, nat2_0_psi)
 
     # Update model with new posterior distributions

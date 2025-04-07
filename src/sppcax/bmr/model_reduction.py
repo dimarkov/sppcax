@@ -80,7 +80,7 @@ def reduce_model(model: PFA, *, key: PRNGKey, max_iter: int = 4) -> PFA:
 
 @dispatch(MultivariateNormal)
 def reduce_model(  # noqa: F811
-    model: MultivariateNormal, *, key: PRNGKey, pi: float = 0.5, max_iter: int = 4
+    model: MultivariateNormal, *, key: PRNGKey, pi: float = 0.5, max_iter: int = 1
 ) -> MultivariateNormal:
     """Reduce model by pruning parameters with insufficient evidence.
 
