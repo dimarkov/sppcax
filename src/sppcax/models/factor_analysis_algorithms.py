@@ -317,14 +317,15 @@ def _expected_log_likelihood(
     exp_ll += 0.5 * jnp.sum(mask * exp_log_psi)  # Use E[log psi]
 
     # Expectation of the quadratic term E[(x - Wz - m)^T psi (x - Wz - m)]
-    term1 = jnp.sum(exp_psi * mask * E_xx_centered)  # E[x^T psi x] related terms
+    term1 = jnp.sum(exp_psi * mask * E_xx_centered)  # E[(x-m)^T psi (x-m)] related terms
     term2 = -2 * jnp.sum(
         exp_psi * mask * (E_x_centered * (W @ Ez[..., None]).squeeze(-1))
-    )  # E[x^T psi W z] related terms
+    )  # E[(x-m)^T psi W z] related terms
     # E[z^T W^T psi W z] related terms, including uncertainty in W
-    term3 = jnp.trace((exp_psi * mask)[..., None] * (W @ Ezz @ W.T), axis1=-1, axis2=-2).sum()  # Part from E[W]
-    cov_w = model.q_w_psi.mvn.covariance
+    term3 = jnp.trace((exp_psi * mask)[..., None] * (W @ Ezz @ W.T), axis1=-1, axis2=-2).sum()
+
     # Term accounting for covariance of W, Tr(E[psi] * E[Z Z^T] * Cov[W])
+    cov_w = model.q_w_psi.mvn.covariance
     term4 = jnp.trace(jnp.expand_dims(mask, (-1, -2)) * (cov_w @ jnp.expand_dims(Ezz, -3)), axis1=-1, axis2=-2).sum()
 
     exp_ll -= 0.5 * (term1 + term2 + term3 + term4)
@@ -341,7 +342,14 @@ def _kl_latent(qz: MultivariateNormal) -> float:
     Returns:
         KL divergence
     """
-    return qz.kl_divergence(MultivariateNormal(loc=jnp.zeros_like(qz.mean), precision=jnp.eye(qz.shape[-1]))).sum()
+    k = qz.shape[-1]
+    mu = qz.mean
+    cov = qz.covariance
+    term1 = jnp.diagonal(cov, axis1=-1, axis2=-2).sum(-1) + jnp.square(mu).sum(-1) - k
+    precision = qz.precision
+    _, logdet = safe_cholesky_and_logdet(precision)
+    kl_div = 0.5 * (term1 + logdet)
+    return kl_div.sum()
 
 
 def _kl_loading_and_psi(model: BayesianFactorAnalysisParams) -> float:
