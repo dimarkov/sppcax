@@ -105,6 +105,7 @@ def gibbs_sampler_mvn(
     from setting its prior mean to zero and prior precision to infinity (effectively pruning the parameter).
 
     Args:
+        key: jax.random.PRNGKey used for sampling from Bernoulli distribution
         mvn_dist: MultivariateNormal distribution
         pi: Prior probability of element being pruned out.
         lam: Current sparisty matrix
@@ -127,17 +128,17 @@ def gibbs_sampler_mvn(
         _lam_k = lam[:, k]
         lam = mask * lam.at[:, k].set(~_lam_k)
         pruned = mask.astype(jnp.int8) - lam
-        delta_f_d = vmap(compute_delta_f_mvn)(pruned, lm_mean, lm_prec)
+        delta_f_n = vmap(compute_delta_f_mvn)(pruned, lm_mean, lm_prec)
 
-        tmp = delta_f_d - delta_f
-        delta_f_d_iim1 = jnp.where(_lam_k == 1, -tmp, tmp)
+        tmp = delta_f_n - delta_f
+        delta_f_n_iim1 = jnp.where(_lam_k == 1, -tmp, tmp)
 
-        p = nn.sigmoid(delta_f_d_iim1 + eta[k])
+        p = nn.sigmoid(delta_f_n_iim1 + eta[k])
         key, _key = jr.split(key)
         lam_k = jr.bernoulli(key, p=p) * mask[:, k]
         lam = lam.at[:, k].set(lam_k)
 
-        delta_f = jnp.where(lam_k == _lam_k, delta_f, delta_f_d)
+        delta_f = jnp.where(lam_k == _lam_k, delta_f, delta_f_n)
         return (lam, delta_f, key), None
 
     init = (lam, delta_f, key)

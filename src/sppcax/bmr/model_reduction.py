@@ -47,7 +47,8 @@ def reduce_model(model: PFA, *, key: PRNGKey, max_iter: int = 4) -> PFA:
     # --- Update model components based on BMR results ---
 
     # Update q(W|psi) mask
-    updated_mvn = eqx.tree_at(lambda x: x.mask, model.q_w_psi.mvn, lam)
+    nat1_w = jnp.where(lam, model.q_w_psi.mvn.nat1, 0.0)
+    updated_mvn = eqx.tree_at(lambda x: (x.mask, x.nat1), model.q_w_psi.mvn, (lam, nat1_w))
 
     # Update q(tau) shape parameter based on new mask
     dnat1_tau = lam.sum(0) / 2
@@ -111,10 +112,10 @@ def reduce_model(  # noqa: F811
     K = model.mask.shape[-1]
     sparity_prior = Beta(10 * pi * jnp.ones(K), 10 * (1 - pi) * jnp.ones(K))
     init = (jnp.zeros(model.batch_shape), sparity_prior, model.mask, key)
-    (_, _, lam, key), _ = lax.scan(step_fn, init, jnp.arange(max_iter))
+    (delta_f, sparsity_dist, lam, key), _ = lax.scan(step_fn, init, jnp.arange(max_iter))
 
     # Update the MVN distribution
-    model = eqx.tree_at(lambda x: x.mask, model, lam)  # update the mask of the loading matrix
+    model = eqx.tree_at(lambda x: (x.mask, x.nat1), model, (lam, jnp.where(lam, model.nat1, 0.0)))
 
     return model
 
