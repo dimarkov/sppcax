@@ -31,6 +31,7 @@ class BayesianFactorAnalysisParams(eqx.Module):
     n_components: int
     n_features: int
     isotropic_noise: bool
+    update_ard: bool
     q_w_psi: MultivariateNormalGamma  # Posterior over W (mvn) and psi (gamma), batched over features
     q_tau: Gamma  # Posterior over tau (ARD prior precision), batched over components
     sparsity_prior: Beta  # Prior over sparsity probaility
@@ -48,6 +49,7 @@ class BayesianFactorAnalysisParams(eqx.Module):
         optimize_with_bmr: bool = False,
         bmr_e_step: bool = False,
         bmr_m_step: bool = False,
+        update_ard: bool = True,
         bmr_e_step_opts: Optional[tuple] = ("max_iter", 4, "pi", 0.5),
         bmr_m_step_opts: Optional[tuple] = ("max_iter", 4),
         data_mask: Optional[Array] = None,
@@ -72,6 +74,7 @@ class BayesianFactorAnalysisParams(eqx.Module):
         self.data_mask = data_mask
         self.bmr_e_step = BMROptions(bmr_e_step, bmr_e_step_opts)
         self.bmr_m_step = BMROptions(bmr_m_step, bmr_m_step_opts)
+        self.update_ard = update_ard
 
         # Initialize mean
         self.mean_ = jnp.zeros(n_features)
@@ -130,6 +133,7 @@ class PPCA(BayesianFactorAnalysisParams):
         optimize_with_bmr: bool = False,
         bmr_e_step: bool = False,
         bmr_m_step: bool = False,
+        update_ard: bool = True,
         bmr_e_step_opts: Optional[tuple] = ("max_iter", 4, "pi", 0.5),
         bmr_m_step_opts: Optional[tuple] = ("max_iter", 4),
         data_mask: Optional[Array] = None,
@@ -150,6 +154,7 @@ class PPCA(BayesianFactorAnalysisParams):
             n_components=n_components,
             n_features=n_features,
             isotropic_noise=True,
+            update_ard=update_ard,
             optimize_with_bmr=optimize_with_bmr,
             bmr_e_step=bmr_e_step,
             bmr_m_step=bmr_m_step,
@@ -170,6 +175,7 @@ class PFA(BayesianFactorAnalysisParams):
         optimize_with_bmr: bool = False,
         bmr_e_step: bool = False,
         bmr_m_step: bool = False,
+        update_ard: bool = True,
         bmr_e_step_opts: Optional[tuple] = ("max_iter", 4, "pi", 0.5),
         bmr_m_step_opts: Optional[tuple] = ("max_iter", 4),
         data_mask: Optional[Array] = None,
@@ -190,6 +196,7 @@ class PFA(BayesianFactorAnalysisParams):
             n_components=n_components,
             n_features=n_features,
             isotropic_noise=False,
+            update_ard=update_ard,
             optimize_with_bmr=optimize_with_bmr,
             bmr_e_step=bmr_e_step,
             bmr_m_step=bmr_m_step,
