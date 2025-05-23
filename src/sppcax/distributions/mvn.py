@@ -83,16 +83,14 @@ class MultivariateNormal(ExponentialFamily):
             # Default to identity matrix with proper broadcasting
             P = jnp.broadcast_to(jnp.eye(dim), (*batch_shape, dim, dim))
 
-        # Apply mask to precision and loc
-        P = self._apply_mask_matrix(P)
-        masked_loc = self._apply_mask_vector(loc)
+        # Apply mask to loc
+        masked_loc = self.apply_mask_vector(loc)
 
         # Set natural parameters
-        self.nat1 = P @ masked_loc[..., None]
-        self.nat1 = self.nat1[..., 0]  # Remove singleton dimension
+        self.nat1 = jnp.squeeze(P @ masked_loc[..., None], -1)
         self.nat2 = -0.5 * P
 
-    def _apply_mask_vector(self, x: Array) -> Array:
+    def apply_mask_vector(self, x: Array) -> Array:
         """Apply mask to a vector, zeroing out masked dimensions.
 
         Args:
@@ -103,7 +101,7 @@ class MultivariateNormal(ExponentialFamily):
         """
         return jnp.where(self.mask, x, 0.0)
 
-    def _apply_mask_matrix(self, x: Array, zeromask: bool = False) -> Array:
+    def apply_mask_matrix(self, x: Array, zeromask: bool = False) -> Array:
         """Apply mask to a matrix, zeroing out masked rows and columns.
 
         Args:
@@ -139,16 +137,16 @@ class MultivariateNormal(ExponentialFamily):
     def mean(self) -> Array:
         """Get mean parameter."""
         mean = solve(self.precision, self.nat1, assume_a="pos")
-        return self._apply_mask_vector(mean)
+        return self.apply_mask_vector(mean)
 
     @property
     def covariance(self) -> Array:
-        return self._apply_mask_matrix(qr_inv(-2.0 * self.nat2), zeromask=True)
+        return self.apply_mask_matrix(qr_inv(-2.0 * self.nat2), zeromask=True)
 
     @property
     def precision(self) -> Array:
         """Get precision parameter."""
-        return self._apply_mask_matrix(-2.0 * self.nat2)
+        return self.apply_mask_matrix(-2.0 * self.nat2)
 
     def sufficient_statistics(self, x: Array) -> Array:
         """Compute sufficient statistics T(x) = [x, xx^T].
@@ -159,7 +157,7 @@ class MultivariateNormal(ExponentialFamily):
         Returns:
             Sufficient statistics [x, vec(xx^T)].
         """
-        x = self._apply_mask_vector(x)
+        x = self.apply_mask_vector(x)
         xx = x[..., None] * x[..., None, :]  # Outer product
         return jnp.concatenate([x, xx.reshape(*x.shape[:-1], -1)], axis=-1)
 
@@ -197,7 +195,7 @@ class MultivariateNormal(ExponentialFamily):
         """
         precision = self.precision
         L, logdet = safe_cholesky_and_logdet(precision)
-        m = self._apply_mask_vector(solve_triangular(L, self.nat1[..., None], lower=True)[..., 0])
+        m = self.apply_mask_vector(solve_triangular(L, self.nat1[..., None], lower=True)[..., 0])
 
         return 0.5 * jnp.sum(jnp.square(m), -1) - 0.5 * logdet
 
@@ -236,4 +234,4 @@ class MultivariateNormal(ExponentialFamily):
         z = jr.normal(key, shape)
         samples = mean + solve_triangular(L, z[..., None], trans=1, lower=True)[..., 0]
 
-        return self._apply_mask_vector(samples)
+        return self.apply_mask_vector(samples)

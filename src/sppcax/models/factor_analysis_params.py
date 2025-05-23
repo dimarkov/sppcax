@@ -7,8 +7,9 @@ import jax.numpy as jnp
 import jax.random as jr
 
 from ..distributions import Beta, Gamma
-from ..distributions.mvn_gamma import MultivariateNormalGamma
+from ..distributions.mvn_gamma import MultivariateNormalInverseGamma
 from ..types import Array, PRNGKey
+from .regression_params import RegressionParams
 
 
 class BMROptions(eqx.Module):
@@ -30,24 +31,30 @@ class BayesianFactorAnalysisParams(eqx.Module):
 
     n_components: int
     n_features: int
+    n_controls: int
     isotropic_noise: bool
-    q_w_psi: MultivariateNormalGamma  # Posterior over W (mvn) and psi (gamma), batched over features
+    update_ard: bool
+    q_w_psi: MultivariateNormalInverseGamma  # Posterior over W (mvn) and psi (gamma), batched over features
     q_tau: Gamma  # Posterior over tau (ARD prior precision), batched over components
     sparsity_prior: Beta  # Prior over sparsity probaility
-    mean_: Array  # Data mean for centering
     optimize_with_bmr: bool  # Whether to apply Bayesian Model Reduction optimization for tau and psi at every step
     bmr_e_step: BMROptions
     bmr_m_step: BMROptions
+    control: Optional[RegressionParams] = None
     data_mask: Optional[Array] = None  # Mask for missing data (True for observed, False for missing)
 
     def __init__(
         self,
         n_components: int,
         n_features: int,
+        n_controls: int = 0,
+        prior_prec_control: float = 1.0,
         isotropic_noise: bool = False,
         optimize_with_bmr: bool = False,
         bmr_e_step: bool = False,
         bmr_m_step: bool = False,
+        update_ard: bool = True,
+        use_bias: bool = True,
         bmr_e_step_opts: Optional[tuple] = ("max_iter", 4, "pi", 0.5),
         bmr_m_step_opts: Optional[tuple] = ("max_iter", 4),
         data_mask: Optional[Array] = None,
@@ -67,19 +74,25 @@ class BayesianFactorAnalysisParams(eqx.Module):
         """
         self.n_components = n_components
         self.n_features = n_features
+        self.n_controls = n_controls
         self.isotropic_noise = isotropic_noise
         self.optimize_with_bmr = optimize_with_bmr
         self.data_mask = data_mask
         self.bmr_e_step = BMROptions(bmr_e_step, bmr_e_step_opts)
         self.bmr_m_step = BMROptions(bmr_m_step, bmr_m_step_opts)
-
-        # Initialize mean
-        self.mean_ = jnp.zeros(n_features)
+        self.update_ard = update_ard
 
         # Initialize parameters
         if key is None:
             key = jr.PRNGKey(0)
-        self._init_params(key)
+        key, _key = jr.split(key)
+        self._init_params(_key)
+
+        if n_controls - (1 - use_bias) >= 0:
+            key, _key = jr.split(key)
+            self.control = RegressionParams(
+                n_controls, n_features, use_bias=use_bias, prior_prec=prior_prec_control, key=_key
+            )
 
     def _init_params(self, key: PRNGKey) -> None:
         """Initialize model parameters."""
@@ -90,7 +103,7 @@ class BayesianFactorAnalysisParams(eqx.Module):
         mask = jnp.clip(jnp.arange(self.n_features), max=self.n_components)[..., None] >= jnp.arange(self.n_components)
 
         # Initialize q(W, psi) - join posterior over the loading matrix, W, and noise precision, psi
-        self.q_w_psi = MultivariateNormalGamma(
+        self.q_w_psi = MultivariateNormalInverseGamma(
             loc=loc, mask=mask, alpha0=2.0, beta0=1.0, isotropic_noise=self.isotropic_noise
         )
 
@@ -127,9 +140,13 @@ class PPCA(BayesianFactorAnalysisParams):
         self,
         n_components: int,
         n_features: int,
+        n_controls: int = 0,
+        prior_prec_control: float = 1.0,
+        use_bias: bool = True,
         optimize_with_bmr: bool = False,
         bmr_e_step: bool = False,
         bmr_m_step: bool = False,
+        update_ard: bool = True,
         bmr_e_step_opts: Optional[tuple] = ("max_iter", 4, "pi", 0.5),
         bmr_m_step_opts: Optional[tuple] = ("max_iter", 4),
         data_mask: Optional[Array] = None,
@@ -149,7 +166,11 @@ class PPCA(BayesianFactorAnalysisParams):
         super().__init__(
             n_components=n_components,
             n_features=n_features,
+            n_controls=n_controls,
+            prior_prec_control=prior_prec_control,
+            use_bias=use_bias,
             isotropic_noise=True,
+            update_ard=update_ard,
             optimize_with_bmr=optimize_with_bmr,
             bmr_e_step=bmr_e_step,
             bmr_m_step=bmr_m_step,
@@ -167,9 +188,13 @@ class PFA(BayesianFactorAnalysisParams):
         self,
         n_components: int,
         n_features: int,
+        n_controls: int = 0,
+        prior_prec_control: float = 1.0,
+        use_bias: bool = True,
         optimize_with_bmr: bool = False,
         bmr_e_step: bool = False,
         bmr_m_step: bool = False,
+        update_ard: bool = True,
         bmr_e_step_opts: Optional[tuple] = ("max_iter", 4, "pi", 0.5),
         bmr_m_step_opts: Optional[tuple] = ("max_iter", 4),
         data_mask: Optional[Array] = None,
@@ -189,7 +214,11 @@ class PFA(BayesianFactorAnalysisParams):
         super().__init__(
             n_components=n_components,
             n_features=n_features,
+            n_controls=n_controls,
+            prior_prec_control=prior_prec_control,
+            use_bias=use_bias,
             isotropic_noise=False,
+            update_ard=update_ard,
             optimize_with_bmr=optimize_with_bmr,
             bmr_e_step=bmr_e_step,
             bmr_m_step=bmr_m_step,

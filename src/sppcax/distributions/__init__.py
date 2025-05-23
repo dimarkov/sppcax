@@ -7,7 +7,7 @@ from .delta import Delta
 from .exponential_family import ExponentialFamily
 from .gamma import Gamma
 from .mvn import MultivariateNormal
-from .mvn_gamma import MultivariateNormalGamma
+from .mvn_gamma import MultivariateNormalInverseGamma
 from .normal import Normal
 from .poisson import Poisson
 
@@ -16,7 +16,7 @@ __all__ = [
     "ExponentialFamily",
     "Normal",
     "MultivariateNormal",
-    "MultivariateNormalGamma",
+    "MultivariateNormalInverseGamma",
     "Categorical",
     "Poisson",
     "Gamma",
