@@ -6,12 +6,8 @@ import equinox as eqx
 import jax.numpy as jnp
 from jax import random as jr
 from jax.scipy.linalg import solve_triangular
-from multimethod import multimethod
 from sppcax.distributions.mvn_gamma import MultivariateNormalInverseGamma
 from sppcax.distributions.utils import safe_cholesky_and_logdet
-
-
-from jaxlib.xla_extension import ArrayImpl
 
 from sppcax.bmr import reduce_model
 from sppcax.distributions import Delta, Distribution, MultivariateNormal
@@ -88,7 +84,7 @@ def e_step(
 
 @eqx.filter_jit
 def _update_params(
-    model: Union[PFA, PPCA], Exx: Array, Exz: Array, Ezz: Matrix, N: Array, BcovuB: Array
+    model: BayesianFactorAnalysisParams, Exx: Array, Exz: Array, Ezz: Matrix, N: Array, BcovuB: Array
 ) -> MultivariateNormalInverseGamma:
     """Update the parameters of (q(W, psi)q(tau)).
 
@@ -114,8 +110,8 @@ def _update_params(
     cov_w = updated_mvn.covariance  # Cov(W) - shape (D, K, K)
     sigma_sqr_w = jnp.diagonal(cov_w, axis1=-1, axis2=-2)  # diag(Cov(W)) - shape (D, K)
 
-    # --- Update Gamma part q(psi) ---
-    dnat1_psi = 0.5 * (N + updated_mvn.mask.sum(-1))
+    # --- Update Inverse Gamma part q(psi) ---
+    dnat1_psi = -0.5 * (N + updated_mvn.mask.sum(-1))
 
     # term1 sum_n diag( E[(x_n - m) (x_n - m)^T] )
     term1_psi = jnp.diag(Exx)
@@ -136,7 +132,7 @@ def _update_params(
         dnat2_psi = jnp.sum(dnat2_psi)
 
     # Update Gamma distribution
-    updated_q_psi = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), model.q_w_psi.gamma, (dnat1_psi, dnat2_psi))
+    updated_q_psi = eqx.tree_at(lambda x: (x.dnat1, x.dnat2), model.q_w_psi.inv_gamma, (dnat1_psi, dnat2_psi))
 
     # --- Update ARD prior precision q(tau) ---
     if model.update_ard:
@@ -150,7 +146,7 @@ def _update_params(
 
     # Combine updated MVN and Gamma parts
     return eqx.tree_at(
-        lambda x: (x.q_w_psi.mvn, x.q_w_psi.gamma, x.q_tau), model, (updated_mvn, updated_q_psi, updated_q_tau)
+        lambda x: (x.q_w_psi.mvn, x.q_w_psi.inv_gamma, x.q_tau), model, (updated_mvn, updated_q_psi, updated_q_tau)
     )
 
 
@@ -248,13 +244,13 @@ def m_step(
         updated_q_tau = eqx.tree_at(lambda x: x.nat2_0, updated_q_tau, nat2_0_tau)
 
         # Update q_psi prior rate (beta0) - Use updated_q_w_psi.gamma
-        updated_q_psi = updated_model.q_w_psi.gamma
+        updated_q_psi = updated_model.q_w_psi.inv_gamma
         nat2_0_psi = updated_q_psi.dnat2 * (updated_q_psi.nat1_0 + 1) / updated_q_psi.dnat1
         updated_q_psi = eqx.tree_at(lambda x: x.nat2_0, updated_q_psi, nat2_0_psi)
 
         # --- Update model ---
         updated_model = eqx.tree_at(
-            lambda x: (x.q_w_psi.gamma, x.q_tau),
+            lambda x: (x.q_w_psi.inv_gamma, x.q_tau),
             updated_model,
             (updated_q_psi, updated_q_tau),
         )
@@ -262,11 +258,10 @@ def m_step(
     return updated_model
 
 
-@multimethod
-def fit(  # noqa: F811
-    model: Union[PPCA, PFA],
-    X: Union[ArrayImpl, Array, Matrix, Distribution],  # DFA expects a time series matrix
-    key: Union[ArrayImpl, PRNGKey],
+def fit(
+    model: BayesianFactorAnalysisParams,
+    X: Union[Array, Matrix, Distribution],  # DFA expects a time series matrix
+    key: Union[PRNGKey],
     U: Array = None,  # inputs/controls
     n_iter: int = 100,
     tol: float = 1e-6,
@@ -508,7 +503,7 @@ def _kl_loading_and_psi(model: BayesianFactorAnalysisParams) -> float:
     kl_w = e_log_q_w - e_log_p_w_tau_psi  # <KL(q(W|psi) || p(W|tau, psi))>_q(psi)q(tau)
 
     # KL divergence for q(psi) relative to its prior p(psi)
-    kl_psi = model.q_w_psi.gamma.kl_divergence_from_prior.sum()
+    kl_psi = model.q_w_psi.inv_gamma.kl_divergence_from_prior.sum()
 
     return kl_w + kl_psi
 

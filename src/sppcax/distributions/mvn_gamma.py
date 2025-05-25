@@ -9,7 +9,7 @@ import equinox as eqx
 
 from ..types import Array, PRNGKey, Shape
 from .exponential_family import ExponentialFamily
-from .gamma import InverseGamma
+from .gamma import InverseGamma, Gamma
 from .mvn import MultivariateNormal
 
 
@@ -178,7 +178,8 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
     @property
     def expected_sufficient_statistics_psi(self) -> Array:
         """Compute expected sufficient statistics of psi."""
-        suff_stats = self.inv_gamma.expected_sufficient_statistics
+        gamma = Gamma(self.alpha, self.beta)
+        suff_stats = gamma.expected_sufficient_statistics
         return jnp.broadcast_to(suff_stats, self.batch_shape + (2,))
 
 

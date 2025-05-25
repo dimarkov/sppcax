@@ -22,7 +22,7 @@ def test_factor_analysis_array_input():  # Renamed test to reflect PFA
 
     # Check shapes
     assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
-    assert model.q_w_psi.gamma.mean.shape == (n_features,)  # Noise precision per feature
+    assert model.q_w_psi.inv_gamma.mean.shape == (n_features,)  # Noise precision per feature
     assert model.q_tau.mean.shape == (n_components,)  # ARD prior precision per component
 
     # Transform data
@@ -47,7 +47,7 @@ def test_factor_analysis_delta_input():  # Renamed test to reflect PFA
 
     # Check shapes
     assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
-    assert model.q_w_psi.gamma.mean.shape == (n_features,)  # Noise precision per feature
+    assert model.q_w_psi.inv_gamma.mean.shape == (n_features,)  # Noise precision per feature
     assert model.q_tau.mean.shape == (n_components,)  # ARD prior precision per component
 
     # Transform data
@@ -74,7 +74,7 @@ def test_ppca_array_input():
 
     # Check shapes
     assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
-    assert model.q_w_psi.gamma.mean.shape == ()  # Scalar noise precision for PPCA
+    assert model.q_w_psi.inv_gamma.mean.shape == ()  # Scalar noise precision for PPCA
     assert model.q_tau.mean.shape == (n_components,)  # ARD prior precision per component
 
     # Transform data
@@ -97,7 +97,7 @@ def test_ppca_delta_input():
 
     # Check shapes
     assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
-    assert model.q_w_psi.gamma.mean.shape == ()  # Scalar noise precision for PPCA
+    assert model.q_w_psi.inv_gamma.mean.shape == ()  # Scalar noise precision for PPCA
     assert model.q_tau.mean.shape == (n_components,)  # ARD prior precision per component
 
     # Transform data
@@ -125,7 +125,7 @@ def test_factor_analysis_mvn_input():  # Renamed test to reflect PFA
 
     # Check shapes
     assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
-    assert model.q_w_psi.gamma.mean.shape == (n_features,)  # Noise precision per feature
+    assert model.q_w_psi.inv_gamma.mean.shape == (n_features,)  # Noise precision per feature
     assert model.q_tau.mean.shape == (n_components,)  # ARD prior precision per component
 
     # Transform data
@@ -148,7 +148,7 @@ def test_ppca_mvn_input():
 
     # Check shapes
     assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
-    assert model.q_w_psi.gamma.mean.shape == ()  # Scalar noise precision for PPCA
+    assert model.q_w_psi.inv_gamma.mean.shape == ()  # Scalar noise precision for PPCA
     assert model.q_tau.mean.shape == (n_components,)  # ARD prior precision per component
 
     # Transform data
