@@ -102,17 +102,17 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
 
         return mvn_log_prob + inv_gamma_log_prob
 
-    def sample(self, key: PRNGKey, sample_shape: Shape = ()) -> Tuple[Array, Array]:
+    def sample(self, seed: PRNGKey, sample_shape: Shape = ()) -> Tuple[Array, Array]:
         """Sample from the distribution.
 
         Args:
-            key: PRNG key
+            seed: PRNG key
             sample_shape: Shape of samples to draw
 
         Returns:
             Tuple of (sig_sqr, value) samples
         """
-        key_g, key_mvn = jr.split(key)
+        key_g, key_mvn = jr.split(seed)
 
         # Sample psi ~ Gamma(α, β)
         sig_sqr = self.inv_gamma.sample(key_g, sample_shape=sample_shape)
@@ -123,7 +123,7 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
         mvn = eqx.tree_at(lambda x: x.nat1, self.mvn, self.mvn.nat1 / sig[..., None])
         value = mvn.sample(key_mvn, sample_shape=sample_shape) * sig[..., None]
 
-        return sig_sqr, value
+        return sig_sqr * jnp.eye(value.shape[-2]), value
 
     def mode(self):
         r"""Solve for the mode. Recall,
@@ -160,6 +160,10 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
         return self.mvn.mean
 
     @property
+    def col_covariance(self) -> Array:
+        return self.mvn.covariance
+
+    @property
     def expected_covariance(self) -> Array:
         # mean of the inverse of precision (variance)
         exp_variance = jnp.broadcast_to(self.inv_gamma.mean, self.batch_shape)
@@ -184,10 +188,10 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
 
 
 def mvnig_posterior_update(mvnig_prior: MultivariateNormalInverseGamma, sufficient_stats: tuple, props: dict):
-    """Update the normal inverse gamma (NIG) distribution using sufficient statistics
+    """Update the multivaraite normal inverse gamma (MVNIG) distribution using sufficient statistics
 
     Returns:
-        posterior NIG distribution
+        posterior MVNIG distribution
     """
     # extract parameters of the prior distribution
     mvn_prior = mvnig_prior.mvn
