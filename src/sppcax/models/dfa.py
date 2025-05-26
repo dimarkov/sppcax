@@ -1,32 +1,103 @@
 import jax.tree_util as jtu
 import jax.numpy as jnp
+import equinox as eqx
 from jax import jit, vmap, tree, random as jr
 
 from fastprogress.fastprogress import progress_bar
 
-from typing import Any, Optional, Union, Tuple
+from typing import Any, Optional, Union, Tuple, NamedTuple
 
 from functools import partial
 
 from dynamax.linear_gaussian_ssm import LinearGaussianConjugateSSM
 from dynamax.utils.utils import ensure_array_has_batch_dim, pytree_stack
-from dynamax.parameters import ParameterSet
+from dynamax.parameters import ParameterSet, ParameterProperties
 from dynamax.linear_gaussian_ssm.inference import (
-    ParamsLGSSM,
     ParamsLGSSMInitial,
     ParamsLGSSMDynamics,
     ParamsLGSSMEmissions,
 )
-from dynamax.utils.distributions import mniw_posterior_update, niw_posterior_update, MatrixNormalInverseWishart
-from dynamax.linear_gaussian_ssm.models import SuffStatsLGSSM
-from dynamax.linear_gaussian_ssm.inference import (
+from dynamax.utils.distributions import (
+    mniw_posterior_update,
+    niw_posterior_update,
+    MatrixNormalInverseWishart,
+    NormalInverseWishart,
+)
+from dynamax.linear_gaussian_ssm.models import SuffStatsLGSSM, Scalar
+from dynamax.linear_gaussian_ssm.parallel_inference import (
     lgssm_posterior_sample,
 )
+from dynamax.utils.bijectors import RealToPSDBijector
 
 from sppcax.types import Array, Vector, Matrix, PRNGKey, Float
 from sppcax.distributions import Distribution
 from sppcax.distributions.mvn_gamma import MultivariateNormalInverseGamma, mvnig_posterior_update
+from sppcax.distributions.utils import qr_inv
+from sppcax.inference.utils import ParamsLGSSMVB
+from sppcax.inference.smoothing import lgssm_smoother
 from .factor_analysis_algorithms import _to_distribution
+
+
+def _mniw_posterior_update(dist, stats, props):
+    # TODO: filter stats based on props
+    return mniw_posterior_update(dist, stats)
+
+
+def _niw_posterior_update(dist, stats, props):
+    # TODO: filter stats based on props
+    return niw_posterior_update(dist, stats)
+
+
+def _posterior_update(dist, stats, props):
+    if isinstance(dist, MultivariateNormalInverseGamma):
+        return mvnig_posterior_update(dist, stats, props)
+    elif isinstance(dist, MatrixNormalInverseWishart):
+        return _mniw_posterior_update(dist, stats, props)
+    else:
+        raise NotImplementedError
+
+
+def _get_moments(dist):
+    if isinstance(dist, Union[NormalInverseWishart, MatrixNormalInverseWishart]):
+        # inverse of expected precision
+        covariance = jnp.einsum("...,...ij->...ij", 1 / dist.df, dist.scale)
+        return covariance, dist.loc
+
+    elif isinstance(dist, MultivariateNormalInverseGamma):
+        mean = dist.mean
+        # inverse of expected precision
+        covariance = jnp.eye(mean.shape[-2]) / dist.inv_gamma.expected_psi
+        return covariance, mean
+
+    else:
+        raise NotImplementedError
+
+
+def _get_correction(dist):
+    if isinstance(dist, MatrixNormalInverseWishart):
+        dim, _ = dist._matrix_normal_shape
+        col_precision = dist.col_precision
+        return dim * qr_inv(col_precision)
+
+    elif isinstance(dist, MultivariateNormalInverseGamma):
+        # inverse of expected precision
+        return dist.col_covariance.sum(-3)
+
+    else:
+        raise NotImplementedError
+
+
+class ParamsLGSSM(NamedTuple):
+    r"""Parameters of a linear Gaussian SSM.
+
+    :param initial: initial distribution parameters
+    :param dynamics: dynamics distribution parameters
+    :param emissions: emission distribution parameters
+
+    """
+    initial: ParamsLGSSMInitial
+    dynamics: Union[ParamsLGSSMDynamics, ParamsLGSSMVB]
+    emissions: Union[ParamsLGSSMEmissions, ParamsLGSSMVB]
 
 
 class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
@@ -66,6 +137,118 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             **kw_priors,
         )
 
+    def initialize(
+        self,
+        key: PRNGKey,
+        initial_mean: Optional[Float[Array, "state_dim"]] = None,  # noqa F772
+        initial_covariance: Optional[Float[Array, "state_dim state_dim"]] = None,  # noqa F772
+        dynamics_weights: Optional[Float[Array, "state_dim state_dim"]] = None,  # noqa F772
+        dynamics_bias: Optional[Float[Array, "state_dim"]] = None,  # noqa F772
+        dynamics_input_weights: Optional[Float[Array, "state_dim input_dim"]] = None,  # noqa F772
+        dynamics_covariance: Optional[Float[Array, "state_dim state_dim"]] = None,  # noqa F772
+        emission_weights: Optional[Float[Array, "emission_dim state_dim"]] = None,  # noqa F772
+        emission_bias: Optional[Float[Array, "emission_dim"]] = None,  # noqa F772
+        emission_input_weights: Optional[Float[Array, "emission_dim input_dim"]] = None,  # noqa F772
+        emission_covariance: Optional[Float[Array, "emission_dim emission_dim"]] = None,  # noqa F772
+        variational_bayes: bool = False,
+    ) -> Tuple[ParamsLGSSM, ParamsLGSSM]:
+        r"""Initialize model parameters that are set to None, and their corresponding properties.
+
+        Args:
+            key: Random number key. Defaults to jr.PRNGKey(0).
+            initial_mean: parameter $m$. Defaults to None.
+            initial_covariance: parameter $S$. Defaults to None.
+            dynamics_weights: parameter $F$. Defaults to None.
+            dynamics_bias: parameter $b$. Defaults to None.
+            dynamics_input_weights: parameter $B$. Defaults to None.
+            dynamics_covariance: parameter $Q$. Defaults to None.
+            emission_weights: parameter $H$. Defaults to None.
+            emission_bias: parameter $d$. Defaults to None.
+            emission_input_weights: parameter $D$. Defaults to None.
+            emission_covariance: parameter $R$. Defaults to None.
+
+        Returns:
+            Tuple[ParamsLGSSM, ParamsLGSSM]: parameters and their properties.
+        """
+
+        # Arbitrary default values, for demo purposes.
+        _initial_mean = jnp.zeros(self.state_dim)
+        _initial_covariance = jnp.eye(self.state_dim)
+        _dynamics_weights = 0.99 * jnp.eye(self.state_dim)
+        _dynamics_input_weights = jnp.zeros((self.state_dim, self.input_dim))
+        _dynamics_bias = jnp.zeros((self.state_dim,)) if self.has_dynamics_bias else None
+        _dynamics_covariance = 0.1 * jnp.eye(self.state_dim)
+        _emission_weights = jr.normal(key, (self.emission_dim, self.state_dim))
+        _emission_input_weights = jnp.zeros((self.emission_dim, self.input_dim))
+        _emission_bias = jnp.zeros((self.emission_dim,)) if self.has_emissions_bias else None
+        _emission_covariance = 0.1 * jnp.eye(self.emission_dim)
+
+        # Only use the values above if the user hasn't specified their own
+        def default(x, x0):
+            return x0 if x is None else x
+
+        # Create nested dictionary of params
+        params = ParamsLGSSM(
+            initial=ParamsLGSSMInitial(
+                mean=default(initial_mean, _initial_mean), cov=default(initial_covariance, _initial_covariance)
+            ),
+            dynamics=ParamsLGSSMDynamics(
+                weights=default(dynamics_weights, _dynamics_weights),
+                bias=default(dynamics_bias, _dynamics_bias),
+                input_weights=default(dynamics_input_weights, _dynamics_input_weights),
+                cov=default(dynamics_covariance, _dynamics_covariance),
+            ),
+            emissions=ParamsLGSSMEmissions(
+                weights=default(emission_weights, _emission_weights),
+                bias=default(emission_bias, _emission_bias),
+                input_weights=default(emission_input_weights, _emission_input_weights),
+                cov=default(emission_covariance, _emission_covariance),
+            ),
+        )
+
+        if variational_bayes:
+            dim = self.state_dim + self.input_dim + self.has_dynamics_bias
+            C_dyn = jnp.zeros((dim, dim))
+            dim = self.state_dim + self.input_dim + self.has_emissions_bias
+            C_em = jnp.zeros((dim, dim))
+
+            dynamics = ParamsLGSSMVB(
+                weights=params.dynamics.weights,
+                bias=params.dynamics.bias,
+                input_weights=params.dynamics.input_weights,
+                cov=params.dynamics.cov,
+                correction=C_dyn,
+            )
+            emissions = ParamsLGSSMVB(
+                weights=params.emissions.weights,
+                bias=params.emissions.bias,
+                input_weights=params.emissions.input_weights,
+                cov=params.emissions.cov,
+                correction=C_em,
+            )
+
+            params = eqx.tree_at(lambda p: (p.dynamics, p.emissions), params, (dynamics, emissions))
+
+        # The keys of param_props must match those of params!
+        props = ParamsLGSSM(
+            initial=ParamsLGSSMInitial(
+                mean=ParameterProperties(), cov=ParameterProperties(constrainer=RealToPSDBijector())
+            ),
+            dynamics=ParamsLGSSMDynamics(
+                weights=ParameterProperties(),
+                bias=ParameterProperties(),
+                input_weights=ParameterProperties(),
+                cov=ParameterProperties(constrainer=RealToPSDBijector()),
+            ),
+            emissions=ParamsLGSSMEmissions(
+                weights=ParameterProperties(),
+                bias=ParameterProperties(),
+                input_weights=ParameterProperties(),
+                cov=ParameterProperties(constrainer=RealToPSDBijector()),
+            ),
+        )
+        return params, props
+
     def m_step(self, params: ParamsLGSSM, props: ParamsLGSSM, batch_stats: SuffStatsLGSSM, m_step_state: Any):
         """Perform the M-step of the EM algorithm.
 
@@ -88,9 +271,11 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         # Perform MAP estimation jointly
         initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props)
         S, m = initial_posterior.mode()
+        log_post = initial_posterior.log_prob([S, m])
 
         dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props)
         Q, FB = dynamics_posterior.mode()
+        log_post += dynamics_posterior.log_prob([Q, FB])
         F = FB[:, : self.state_dim]
         B, b = (
             (FB[:, self.state_dim : -1], FB[:, -1])
@@ -100,6 +285,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         emission_posterior = _posterior_update(self.emission_prior, emission_stats, props)
         R, HD = emission_posterior.mode()
+        log_post += emission_posterior.log_prob([R, HD])
         H = HD[:, : self.state_dim]
         D, d = (
             (HD[:, self.state_dim : -1], HD[:, -1])
@@ -112,7 +298,82 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             dynamics=ParamsLGSSMDynamics(weights=F, bias=b, input_weights=B, cov=Q),
             emissions=ParamsLGSSMEmissions(weights=H, bias=d, input_weights=D, cov=R),
         )
-        return params, m_step_state
+        return params, log_post, m_step_state
+
+    def e_step(
+        self,
+        params: ParamsLGSSM,
+        emissions: Union[
+            Float[Array, "num_timesteps emission_dim"],  # noqa F772
+            Float[Array, "num_batches num_timesteps emission_dim"],  # noqa F772
+        ],
+        inputs: Optional[
+            Union[
+                Float[Array, "num_timesteps input_dim"],  # noqa F772
+                Float[Array, "num_batches num_timesteps input_dim"],  # noqa F772
+            ]
+        ] = None,
+    ) -> Tuple[SuffStatsLGSSM, Scalar]:
+        """Compute expected sufficient statistics for the E-step of the EM algorithm.
+
+        Args:
+            params: model parameters.
+            emissions: sequence of observations.
+            inputs: optional sequence of inputs.
+
+        Returns:
+            expected sufficient statistics and marginal log likelihood.
+        """
+        num_timesteps = emissions.shape[0]
+        if inputs is None:
+            inputs = jnp.zeros((num_timesteps, 0))
+
+        # Run the smoother to get posterior expectations
+        posterior = lgssm_smoother(params, emissions, inputs, variational_bayes=False)
+
+        # shorthand
+        Ex = posterior.smoothed_means
+        Exp = posterior.smoothed_means[:-1]
+        Exn = posterior.smoothed_means[1:]
+        Vx = posterior.smoothed_covariances
+        Vxp = posterior.smoothed_covariances[:-1]
+        Vxn = posterior.smoothed_covariances[1:]
+        Expxn = posterior.smoothed_cross_covariances
+
+        # Append bias to the inputs
+        # TODO: use pad instead concatenate
+        inputs = jnp.concatenate((inputs, jnp.ones((num_timesteps, 1))), axis=1)
+        up = inputs[:-1]
+        u = inputs
+        y = emissions
+
+        # expected sufficient statistics for the initial tfd.Distribution
+        Ex0 = posterior.smoothed_means[0]
+        Ex0x0T = posterior.smoothed_covariances[0] + jnp.outer(Ex0, Ex0)
+        init_stats = (Ex0, Ex0x0T, 1)
+
+        # expected sufficient statistics for the dynamics tfd.Distribution
+        # let zp[t] = [x[t], u[t]] for t = 0...T-2
+        # let xn[t] = x[t+1]          for t = 0...T-2
+        sum_zpzpT = jnp.block([[Exp.T @ Exp, Exp.T @ up], [up.T @ Exp, up.T @ up]])
+        sum_zpzpT = sum_zpzpT.at[: self.state_dim, : self.state_dim].add(Vxp.sum(0))
+        sum_zpxnT = jnp.block([[Expxn.sum(0)], [up.T @ Exn]])
+        sum_xnxnT = Vxn.sum(0) + Exn.T @ Exn
+        dynamics_stats = (sum_zpzpT, sum_zpxnT, sum_xnxnT, num_timesteps - 1)
+        if not self.has_dynamics_bias:
+            dynamics_stats = (sum_zpzpT[:-1, :-1], sum_zpxnT[:-1, :], sum_xnxnT, num_timesteps - 1)
+
+        # more expected sufficient statistics for the emissions
+        # let z[t] = [x[t], u[t]] for t = 0...T-1
+        sum_zzT = jnp.block([[Ex.T @ Ex, Ex.T @ u], [u.T @ Ex, u.T @ u]])
+        sum_zzT = sum_zzT.at[: self.state_dim, : self.state_dim].add(Vx.sum(0))
+        sum_zyT = jnp.block([[Ex.T @ y], [u.T @ y]])
+        sum_yyT = emissions.T @ emissions
+        emission_stats = (sum_zzT, sum_zyT, sum_yyT, num_timesteps)
+        if not self.has_emissions_bias:
+            emission_stats = (sum_zzT[:-1, :-1], sum_zyT[:-1, :], sum_yyT, num_timesteps)
+
+        return (init_stats, dynamics_stats, emission_stats), posterior.marginal_loglik
 
     def vbm_step(
         self, params: ParamsLGSSM, props: ParamsLGSSM, batch_stats: SuffStatsLGSSM, m_step_state: Any
@@ -137,19 +398,10 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         # Perform MAP estimation jointly
         initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props)
-        S, m = initial_posterior.mode()
-
-        dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props)
-        Q, FB = dynamics_posterior.mode()
-        F = FB[:, : self.state_dim]
-        B, b = (
-            (FB[:, self.state_dim : -1], FB[:, -1])
-            if self.has_dynamics_bias
-            else (FB[:, self.state_dim :], jnp.zeros(self.state_dim))
-        )
+        S, m = _get_moments(initial_posterior)
 
         emission_posterior = _posterior_update(self.emission_prior, emission_stats, props)
-        R, HD = emission_posterior.mode()
+        R, HD = _get_moments(emission_posterior)
         H = HD[:, : self.state_dim]
         D, d = (
             (HD[:, self.state_dim : -1], HD[:, -1])
@@ -157,12 +409,102 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             else (HD[:, self.state_dim :], jnp.zeros(self.emission_dim))
         )
 
+        dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props)
+        Q, FB = _get_moments(dynamics_posterior)
+
+        F = FB[:, : self.state_dim]
+        B, b = (
+            (FB[:, self.state_dim : -1], FB[:, -1])
+            if self.has_dynamics_bias
+            else (FB[:, self.state_dim :], jnp.zeros(self.state_dim))
+        )
+
+        # Get correction for Q, R
+        C_em = _get_correction(emission_posterior)
+        C_dyn = _get_correction(dynamics_posterior)
+
         params = ParamsLGSSM(
             initial=ParamsLGSSMInitial(mean=m, cov=S),
-            dynamics=ParamsLGSSMDynamics(weights=F, bias=b, input_weights=B, cov=Q),
-            emissions=ParamsLGSSMEmissions(weights=H, bias=d, input_weights=D, cov=R),
+            dynamics=ParamsLGSSMVB(weights=F, bias=b, input_weights=B, cov=Q, correction=C_dyn),
+            emissions=ParamsLGSSMVB(weights=H, bias=d, input_weights=D, cov=R, correction=C_em),
         )
         return params, m_step_state
+
+    # Variational Bayes Expectation-maximization (VBEM) code
+    def vbe_step(
+        self,
+        params: ParamsLGSSM,
+        emissions: Union[
+            Float[Array, "num_timesteps emission_dim"],  # noqa F772
+            Float[Array, "num_batches num_timesteps emission_dim"],  # noqa F772
+        ],
+        inputs: Optional[
+            Union[
+                Float[Array, "num_timesteps input_dim"],  # noqa F772
+                Float[Array, "num_batches num_timesteps input_dim"],  # noqa F772
+            ]
+        ] = None,
+    ) -> Tuple[SuffStatsLGSSM, Scalar]:
+        """Compute expected sufficient statistics for the E-step of the EM algorithm.
+
+        Args:
+            params: model parameters.
+            emissions: sequence of observations.
+            inputs: optional sequence of inputs.
+
+        Returns:
+            expected sufficient statistics and marginal log likelihood.
+        """
+        num_timesteps = emissions.shape[0]
+        if inputs is None:
+            inputs = jnp.zeros((num_timesteps, 0))
+
+        # Run the smoother to get posterior expectations
+        posterior = lgssm_smoother(params, emissions, inputs, variational_bayes=True)
+
+        # shorthand
+        Ex = posterior.smoothed_means
+        Exp = posterior.smoothed_means[:-1]
+        Exn = posterior.smoothed_means[1:]
+        Vx = posterior.smoothed_covariances
+        Vxp = posterior.smoothed_covariances[:-1]
+        Vxn = posterior.smoothed_covariances[1:]
+        Expxn = posterior.smoothed_cross_covariances
+
+        # Append bias to the inputs
+        # TODO: use pad instead concatenate
+        inputs = jnp.concatenate((inputs, jnp.ones((num_timesteps, 1))), axis=1)
+        up = inputs[:-1]
+        u = inputs
+        y = emissions
+
+        # expected sufficient statistics for the initial tfd.Distribution
+        Ex0 = posterior.smoothed_means[0]
+        Ex0x0T = posterior.smoothed_covariances[0] + jnp.outer(Ex0, Ex0)
+        init_stats = (Ex0, Ex0x0T, 1)
+
+        # expected sufficient statistics for the dynamics tfd.Distribution
+        # let zp[t] = [x[t], u[t]] for t = 0...T-2
+        # let xn[t] = x[t+1]          for t = 0...T-2
+        sum_zpzpT = jnp.block([[Exp.T @ Exp, Exp.T @ up], [up.T @ Exp, up.T @ up]])
+        sum_zpzpT = sum_zpzpT.at[: self.state_dim, : self.state_dim].add(Vxp.sum(0))
+        sum_zpxnT = jnp.block([[Expxn.sum(0)], [up.T @ Exn]])
+        sum_xnxnT = Vxn.sum(0) + Exn.T @ Exn
+        dynamics_stats = (sum_zpzpT, sum_zpxnT, sum_xnxnT, num_timesteps - 1)
+        if not self.has_dynamics_bias:
+            dynamics_stats = (sum_zpzpT[:-1, :-1], sum_zpxnT[:-1, :], sum_xnxnT, num_timesteps - 1)
+
+        # more expected sufficient statistics for the emissions
+        # let z[t] = [x[t], u[t]] for t = 0...T-1
+        sum_zzT = jnp.block([[Ex.T @ Ex, Ex.T @ u], [u.T @ Ex, u.T @ u]])
+        sum_zzT = sum_zzT.at[: self.state_dim, : self.state_dim].add(Vx.sum(0))
+        sum_zyT = jnp.block([[Ex.T @ y], [u.T @ y]])
+        sum_yyT = emissions.T @ emissions
+        emission_stats = (sum_zzT, sum_zyT, sum_yyT, num_timesteps)
+        if not self.has_emissions_bias:
+            emission_stats = (sum_zzT[:-1, :-1], sum_zyT[:-1, :], sum_yyT, num_timesteps)
+
+        return (init_stats, dynamics_stats, emission_stats), posterior.marginal_loglik
 
     def fit_em(
         self,
@@ -212,22 +554,22 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         # TODO: figure out how to deal with (y, u) uncertainties in dynamax
 
         @jit
-        def em_step(params, m_step_state):
+        def em_step(params, log_post, m_step_state):
             """Perform one EM step."""
             batch_stats, lls = vmap(partial(self.e_step, params))(batch_emissions, batch_inputs)
-            lp = self.log_prior(params) + lls.sum()
-            params, m_step_state = self.m_step(params, props, batch_stats, m_step_state)
-            return params, m_step_state, lp
+            elbo = self.log_prior(params) + lls.sum() - log_post
+            params, log_post, m_step_state = self.m_step(params, props, batch_stats, m_step_state)
+            return params, log_post, elbo, m_step_state
 
         elbos = []
         m_step_state = self.initialize_m_step_state(params, props)
         pbar = progress_bar(range(num_iters)) if verbose else range(num_iters)
+        log_post = 0.0
         for _ in pbar:
-            params, m_step_state, marginal_logprob = em_step(params, m_step_state)
-            # TODO: compute full elbo
-            elbos.append(marginal_logprob)
+            params, log_post, elbo, m_step_state = em_step(params, log_post, m_step_state)
+            elbos.append(elbo)
 
-        return params, jnp.array(elbos)
+        return params, jnp.array(elbos)[1:]
 
     def fit_vbem(
         self,
@@ -281,7 +623,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             """Perform one EM step."""
             batch_stats, lls = vmap(partial(self.e_step, params))(batch_emissions, batch_inputs)
             lp = self.log_prior(params) + lls.sum()
-            params, m_step_state = self.m_step(params, props, batch_stats, m_step_state)
+            params, m_step_state = self.vbm_step(params, props, batch_stats, m_step_state)
             return params, m_step_state, lp
 
         elbos = []
@@ -298,15 +640,18 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         self,
         key: PRNGKey,
         initial_params: ParamsLGSSM,
+        props: ParamsLGSSM,
         sample_size: int,
         emissions: Float[Array, "nbatch num_timesteps emission_dim"],  # noqa: F722
         inputs: Optional[Float[Array, "nbatch num_timesteps input_dim"]] = None,  # noqa: F722
+        verbose: bool = False,
     ) -> ParamsLGSSM:
         r"""Estimate parameter posterior using block-Gibbs sampler.
 
         Args:
             key: random number key.
             initial_params: starting parameters.
+            props: parameter properties.
             sample_size: how many samples to draw.
             emissions: set of observation sequences.
             inputs: optional set of input sequences.
@@ -357,12 +702,14 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             rngs = iter(jr.split(rng, 3))
 
             # Sample the initial params
-            initial_posterior = niw_posterior_update(self.initial_prior, init_stats)
+            initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props)
             S, m = initial_posterior.sample(seed=next(rngs))
+            log_post = initial_posterior.log_prob([S, m])
 
             # Sample the dynamics params
-            dynamics_posterior = mniw_posterior_update(self.dynamics_prior, dynamics_stats)
+            dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props)
             Q, FB = dynamics_posterior.sample(seed=next(rngs))
+            log_post += dynamics_posterior.log_prob([Q, FB])
             F = FB[:, : self.state_dim]
             B, b = (
                 (FB[:, self.state_dim : -1], FB[:, -1])
@@ -371,8 +718,9 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             )
 
             # Sample the emission params
-            emission_posterior = mniw_posterior_update(self.emission_prior, emission_stats)
+            emission_posterior = _posterior_update(self.emission_prior, emission_stats, props)
             R, HD = emission_posterior.sample(seed=next(rngs))
+            log_post += emission_posterior.log_prob([R, HD])
             H = HD[:, : self.state_dim]
             D, d = (
                 (HD[:, self.state_dim : -1], HD[:, -1])
@@ -385,46 +733,36 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
                 dynamics=ParamsLGSSMDynamics(weights=F, bias=b, input_weights=B, cov=Q),
                 emissions=ParamsLGSSMEmissions(weights=H, bias=d, input_weights=D, cov=R),
             )
-            return params
+
+            return params, log_post
 
         @jit
-        def one_sample(_params, rng):
+        def one_sample(_params, log_post, rng):
             """Sample a single set of states and compute their sufficient stats."""
             rngs = jr.split(rng, 2)
             # Sample latent states
             batch_keys = jr.split(rngs[0], num=num_batches)
             forward_backward_batched = vmap(partial(lgssm_posterior_sample, params=_params))
-            batch_states = forward_backward_batched(batch_keys, emissions=batch_emissions, inputs=batch_inputs)
+            batch_states, batch_ll = forward_backward_batched(
+                batch_keys, emissions=batch_emissions, inputs=batch_inputs
+            )
+
+            elbo = batch_ll + self.log_prior(_params) - log_post
             _batch_stats = vmap(sufficient_stats_from_sample)(batch_emissions, batch_inputs, batch_states)
             # Aggregate statistics from all observations.
             _stats = tree.map(lambda x: jnp.sum(x, axis=0), _batch_stats)
             # Sample parameters
-            return lgssm_params_sample(rngs[1], _stats)
+            return lgssm_params_sample(rngs[1], _stats), elbo
 
         sample_of_params = []
+        elbos = []
         keys = iter(jr.split(key, sample_size))
         current_params = initial_params
-        for _ in progress_bar(range(sample_size)):
+        log_post = 0.0
+        pb = progress_bar(range(sample_size)) if verbose else range(sample_size)
+        for _ in pb:
             sample_of_params.append(current_params)
-            current_params = one_sample(current_params, next(keys))
+            (current_params, log_post), elbo = one_sample(current_params, log_post, next(keys))
+            elbos.append(elbo)
 
-        return pytree_stack(sample_of_params)
-
-
-def _mniw_posterior_update(dist, stats, props):
-    # TODO: filter stats based on props
-    return mniw_posterior_update(dist, stats)
-
-
-def _niw_posterior_update(dist, stats, props):
-    # TODO: filter stats based on props
-    return niw_posterior_update(dist, stats)
-
-
-def _posterior_update(dist, stats, props):
-    if isinstance(dist, MultivariateNormalInverseGamma):
-        return mvnig_posterior_update(dist, stats, props)
-    elif isinstance(dist, MatrixNormalInverseWishart):
-        return _mniw_posterior_update(dist, stats, props)
-    else:
-        raise NotImplementedError
+        return pytree_stack(sample_of_params), jnp.stack(elbos)
