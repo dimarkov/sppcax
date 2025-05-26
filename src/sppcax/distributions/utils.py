@@ -1,9 +1,15 @@
 """Utility functions for distributions."""
 
 import jax.numpy as jnp
-from jax.scipy.linalg import cholesky, solve
+from jax.scipy.linalg import cholesky, solve, qr, solve_triangular
+
 
 from ..types import Array, Scalar
+
+
+def qr_inv(matrix):
+    q, r = qr(matrix)
+    return solve_triangular(r, q.mT)
 
 
 def safe_cholesky(X: Array, jitter: float = 1e-12) -> tuple[Array, Scalar]:

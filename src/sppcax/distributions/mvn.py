@@ -4,16 +4,11 @@ from typing import ClassVar, Optional
 
 import jax.numpy as jnp
 import jax.random as jr
-from jax.scipy.linalg import qr, solve, solve_triangular
+from jax.scipy.linalg import solve, solve_triangular
 
 from ..types import Array, Matrix, PRNGKey, Shape, Vector
 from .exponential_family import ExponentialFamily
-from .utils import safe_cholesky, safe_cholesky_and_logdet
-
-
-def qr_inv(matrix):
-    q, r = qr(matrix)
-    return solve_triangular(r, q.mT)
+from .utils import safe_cholesky, safe_cholesky_and_logdet, qr_inv
 
 
 class MultivariateNormal(ExponentialFamily):
@@ -223,7 +218,8 @@ class MultivariateNormal(ExponentialFamily):
             Samples from the distribution.
         """
         precision = self.precision
-        mean = jnp.linalg.solve(precision, self.nat1[..., None])[..., 0]
+        # TODO: reduce number of inverse operations
+        mean = solve(precision, self.nat1, assume_a="pos")
 
         # Use Cholesky for sampling
         L = safe_cholesky(precision)
