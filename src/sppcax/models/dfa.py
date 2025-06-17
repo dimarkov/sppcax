@@ -1,7 +1,7 @@
 import jax.tree_util as jtu
 import jax.numpy as jnp
 import equinox as eqx
-from jax import jit, vmap, tree, random as jr
+from jax import lax, jit, vmap, tree, random as jr
 
 from fastprogress.fastprogress import progress_bar
 
@@ -16,6 +16,8 @@ from dynamax.linear_gaussian_ssm.inference import (
     ParamsLGSSMInitial,
     ParamsLGSSMDynamics,
     ParamsLGSSMEmissions,
+    lgssm_smoother as dynamax_lgssm_smoother,
+    lgssm_posterior_sample,
 )
 from dynamax.utils.distributions import (
     mniw_posterior_update,
@@ -25,16 +27,17 @@ from dynamax.utils.distributions import (
 )
 from dynamax.linear_gaussian_ssm.models import SuffStatsLGSSM, Scalar
 from dynamax.linear_gaussian_ssm.parallel_inference import (
-    lgssm_posterior_sample,
+    lgssm_posterior_sample as parallel_lgssm_posterior_sample,
+    lgssm_smoother as parallel_dynamax_lgssm_smoother,
 )
 from dynamax.utils.bijectors import RealToPSDBijector
 
 from sppcax.types import Array, Vector, Matrix, PRNGKey, Float
 from sppcax.distributions import Distribution
 from sppcax.distributions.mvn_gamma import MultivariateNormalInverseGamma, mvnig_posterior_update
-from sppcax.distributions.utils import qr_inv
+from sppcax.distributions.utils import cho_inv
 from sppcax.inference.utils import ParamsLGSSMVB
-from sppcax.inference.smoothing import lgssm_smoother
+from sppcax.inference.smoothing import lgssm_smoother as sppcax_smoother
 from .factor_analysis_algorithms import _to_distribution
 
 
@@ -77,7 +80,7 @@ def _get_correction(dist):
     if isinstance(dist, MatrixNormalInverseWishart):
         dim, _ = dist._matrix_normal_shape
         col_precision = dist.col_precision
-        return dim * qr_inv(col_precision)
+        return dim * cho_inv(col_precision)
 
     elif isinstance(dist, MultivariateNormalInverseGamma):
         # inverse of expected precision
@@ -126,7 +129,14 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
     """
 
     def __init__(
-        self, state_dim, emission_dim, input_dim=0, has_dynamics_bias=True, has_emissions_bias=True, **kw_priors
+        self,
+        state_dim,
+        emission_dim,
+        input_dim=0,
+        has_dynamics_bias=True,
+        has_emissions_bias=True,
+        parallel_scan=False,
+        **kw_priors,
     ):
         super().__init__(
             state_dim,
@@ -136,6 +146,8 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             has_emissions_bias=has_emissions_bias,
             **kw_priors,
         )
+
+        self.parallel_scan = parallel_scan
 
     def initialize(
         self,
@@ -329,7 +341,11 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             inputs = jnp.zeros((num_timesteps, 0))
 
         # Run the smoother to get posterior expectations
-        posterior = lgssm_smoother(params, emissions, inputs, variational_bayes=False)
+        # posterior = lgssm_smoother(params, emissions, inputs, variational_bayes=False)
+        if self.parallel_scan:
+            posterior = parallel_dynamax_lgssm_smoother(params, emissions, inputs)
+        else:
+            posterior = dynamax_lgssm_smoother(params, emissions, inputs)
 
         # shorthand
         Ex = posterior.smoothed_means
@@ -419,6 +435,9 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             else (FB[:, self.state_dim :], jnp.zeros(self.state_dim))
         )
 
+        # TODO: Compute kl divergence
+        kl_div = 0.0
+
         # Get correction for Q, R
         C_em = _get_correction(emission_posterior)
         C_dyn = _get_correction(dynamics_posterior)
@@ -428,12 +447,12 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             dynamics=ParamsLGSSMVB(weights=F, bias=b, input_weights=B, cov=Q, correction=C_dyn),
             emissions=ParamsLGSSMVB(weights=H, bias=d, input_weights=D, cov=R, correction=C_em),
         )
-        return params, m_step_state
+        return params, kl_div, m_step_state
 
     # Variational Bayes Expectation-maximization (VBEM) code
     def vbe_step(
         self,
-        params: ParamsLGSSM,
+        params: ParamsLGSSMVB,
         emissions: Union[
             Float[Array, "num_timesteps emission_dim"],  # noqa F772
             Float[Array, "num_batches num_timesteps emission_dim"],  # noqa F772
@@ -460,7 +479,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             inputs = jnp.zeros((num_timesteps, 0))
 
         # Run the smoother to get posterior expectations
-        posterior = lgssm_smoother(params, emissions, inputs, variational_bayes=True)
+        posterior = sppcax_smoother(params, emissions, inputs, variational_bayes=True, parallel_scan=self.parallel_scan)
 
         # shorthand
         Ex = posterior.smoothed_means
@@ -561,19 +580,32 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             params, log_post, m_step_state = self.m_step(params, props, batch_stats, m_step_state)
             return params, log_post, elbo, m_step_state
 
-        elbos = []
         m_step_state = self.initialize_m_step_state(params, props)
-        pbar = progress_bar(range(num_iters)) if verbose else range(num_iters)
         log_post = 0.0
-        for _ in pbar:
-            params, log_post, elbo, m_step_state = em_step(params, log_post, m_step_state)
-            elbos.append(elbo)
+        carry = (params, log_post, m_step_state)
 
-        return params, jnp.array(elbos)[1:]
+        def step_fn(carry, *args):
+            params, log_post, m_step_state = carry
+            params, log_post, elbo, m_step_state = em_step(params, log_post, m_step_state)
+            return (params, log_post, m_step_state), elbo
+
+        if verbose:
+            pbar = progress_bar(range(num_iters)) if verbose else range(num_iters)
+            elbos = []
+            for _ in pbar:
+                carry, elbo = step_fn(carry)
+                elbos.append(elbo)
+                params = carry[0]
+            elbos = jnp.stack(elbos).squeeze()
+        else:
+            (params, _, _), elbos = lax.scan(step_fn, (params, log_post, m_step_state), jnp.arange(num_iters))
+            elbos = elbos.squeeze()
+
+        return params, elbos[1:]
 
     def fit_vbem(
         self,
-        params: ParamsLGSSM,
+        params: ParamsLGSSMVB,
         props: ParamsLGSSM,
         Y: Union[Matrix, Distribution],  # DFA expects a time series matrix
         key: PRNGKey,
@@ -618,23 +650,34 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             batch_inputs = None
         # TODO: figure out how to deal with (y, u) uncertainties in dynamax
 
-        @jit
-        def em_step(params, m_step_state):
+        def em_step(params, kl_div, m_step_state):
             """Perform one EM step."""
-            batch_stats, lls = vmap(partial(self.e_step, params))(batch_emissions, batch_inputs)
-            lp = self.log_prior(params) + lls.sum()
-            params, m_step_state = self.vbm_step(params, props, batch_stats, m_step_state)
-            return params, m_step_state, lp
+            batch_stats, lls = vmap(partial(self.vbe_step, params))(batch_emissions, batch_inputs)
+            elbo = kl_div + lls.sum()
+            params, kl_div, m_step_state = self.vbm_step(params, props, batch_stats, m_step_state)
+            return params, kl_div, elbo, m_step_state
 
-        elbos = []
         m_step_state = self.initialize_m_step_state(params, props)
-        pbar = progress_bar(range(num_iters)) if verbose else range(num_iters)
-        for _ in pbar:
-            params, m_step_state, marginal_logprob = em_step(params, m_step_state)
-            # TODO: compute full elbo
-            elbos.append(marginal_logprob)
+        kl_div = 0.0
+        carry = (params, kl_div, m_step_state)
 
-        return params, jnp.array(elbos)
+        def step_fn(carry, *args):
+            params, kl_div, m_step_state = carry
+            params, kl_div, elbo, m_step_state = em_step(params, kl_div, m_step_state)
+            return (params, kl_div, m_step_state), elbo
+
+        if verbose:
+            pbar = progress_bar(range(num_iters)) if verbose else range(num_iters)
+            elbos = []
+            for _ in pbar:
+                carry, elbo = jit(step_fn)(carry)
+                elbos.append(elbo)
+                params = carry[0]
+            elbos = jnp.stack(elbos)
+        else:
+            (params, _, _), elbos = lax.scan(step_fn, (params, kl_div, m_step_state), jnp.arange(num_iters))
+
+        return params, elbos.squeeze()[1:]
 
     def fit_blocked_gibbs(
         self,
@@ -645,6 +688,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         emissions: Float[Array, "nbatch num_timesteps emission_dim"],  # noqa: F722
         inputs: Optional[Float[Array, "nbatch num_timesteps input_dim"]] = None,  # noqa: F722
         verbose: bool = False,
+        burn_in: int = 0,
     ) -> ParamsLGSSM:
         r"""Estimate parameter posterior using block-Gibbs sampler.
 
@@ -736,13 +780,16 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
             return params, log_post
 
-        @jit
         def one_sample(_params, log_post, rng):
             """Sample a single set of states and compute their sufficient stats."""
             rngs = jr.split(rng, 2)
             # Sample latent states
             batch_keys = jr.split(rngs[0], num=num_batches)
-            forward_backward_batched = vmap(partial(lgssm_posterior_sample, params=_params))
+            if self.parallel_scan:
+                forward_backward_batched = vmap(partial(parallel_lgssm_posterior_sample, params=_params))
+            else:
+                forward_backward_batched = vmap(partial(lgssm_posterior_sample, params=_params))
+
             batch_states, batch_ll = forward_backward_batched(
                 batch_keys, emissions=batch_emissions, inputs=batch_inputs
             )
@@ -754,15 +801,29 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             # Sample parameters
             return lgssm_params_sample(rngs[1], _stats), elbo
 
-        sample_of_params = []
-        elbos = []
-        keys = iter(jr.split(key, sample_size))
-        current_params = initial_params
-        log_post = 0.0
-        pb = progress_bar(range(sample_size)) if verbose else range(sample_size)
-        for _ in pb:
-            sample_of_params.append(current_params)
-            (current_params, log_post), elbo = one_sample(current_params, log_post, next(keys))
-            elbos.append(elbo)
+        def step_fn(carry, *args):
+            params, log_post, key = carry
+            key, _key = jr.split(key)
+            (current_params, log_post), elbo = one_sample(params, log_post, _key)
+            return (current_params, log_post, key), (params, elbo)
 
-        return pytree_stack(sample_of_params), jnp.stack(elbos)
+        log_post = 0.0
+        carry = (initial_params, log_post, key)
+        if verbose:
+            sample_of_params = []
+            elbos = []
+            pb = progress_bar(range(sample_size))
+            for _ in pb:
+                carry, (current_params, elbo) = jit(step_fn)(carry)
+                sample_of_params.append(current_params)
+                elbos.append(elbo)
+
+            sample_of_params = pytree_stack(sample_of_params)
+            elbos = jnp.stack(elbos)
+        else:
+            _, (sample_of_params, elbos) = lax.scan(step_fn, carry, jnp.arange(sample_size))
+
+        if burn_in > 0:
+            return jtu.tree_map(lambda x: x[burn_in:], sample_of_params), elbos.squeeze()[burn_in:]
+        else:
+            return sample_of_params, elbos.squeeze()
