@@ -8,10 +8,15 @@ from jax import jit
 from ..types import Array, Scalar
 
 
+def symmetrize(matrix):
+    """Symmetrize one or more matrices."""
+    return 0.5 * (matrix + jnp.swapaxes(matrix, -1, -2))
+
+
 @jit
-def cho_inv(matrix):
-    chol = cho_factor(matrix)
+def cho_inv(matrix, diagonal_boost=1e-9):
     identity = jnp.eye(matrix.shape[-1], dtype=matrix.dtype)
+    chol = cho_factor(symmetrize(matrix) + diagonal_boost * identity, lower=True)
     return cho_solve(chol, identity)
 
 
