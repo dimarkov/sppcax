@@ -1,17 +1,21 @@
 """Utility functions for distributions."""
 
 import jax.numpy as jnp
-from jax.scipy.linalg import cholesky, solve, qr, solve_triangular
+from jax.scipy.linalg import cholesky, solve, cho_factor, cho_solve
+from jax import jit
 
 
 from ..types import Array, Scalar
 
 
-def qr_inv(matrix):
-    q, r = qr(matrix)
-    return solve_triangular(r, q.mT)
+@jit
+def cho_inv(matrix):
+    chol = cho_factor(matrix)
+    identity = jnp.eye(matrix.shape[-1], dtype=matrix.dtype)
+    return cho_solve(chol, identity)
 
 
+@jit
 def safe_cholesky(X: Array, jitter: float = 1e-12) -> tuple[Array, Scalar]:
     """Compute Cholesky decomposition and log determinant with added diagonal jitter.
 
@@ -29,6 +33,7 @@ def safe_cholesky(X: Array, jitter: float = 1e-12) -> tuple[Array, Scalar]:
     return L
 
 
+@jit
 def safe_cholesky_and_logdet(X: Array, jitter: float = 1e-12) -> tuple[Array, Scalar]:
     """Compute Cholesky decomposition and log determinant with added diagonal jitter.
 
@@ -45,6 +50,7 @@ def safe_cholesky_and_logdet(X: Array, jitter: float = 1e-12) -> tuple[Array, Sc
     return L, logdet
 
 
+@jit
 def natural_to_moment(nat1: Array, nat2: Array) -> tuple[Array, Array]:
     """Convert natural parameters to moment parameters for multivariate normal.
 
@@ -61,6 +67,7 @@ def natural_to_moment(nat1: Array, nat2: Array) -> tuple[Array, Array]:
     return mean, covariance
 
 
+@jit
 def moment_to_natural(mean: Array, covariance: Array) -> tuple[Array, Array]:
     """Convert moment parameters to natural parameters for multivariate normal.
 
