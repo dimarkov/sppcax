@@ -8,7 +8,7 @@ from jax.scipy.linalg import solve, solve_triangular
 
 from ..types import Array, Matrix, PRNGKey, Shape, Vector
 from .exponential_family import ExponentialFamily
-from .utils import safe_cholesky, safe_cholesky_and_logdet, qr_inv
+from .utils import safe_cholesky, safe_cholesky_and_logdet, cho_inv
 
 
 class MultivariateNormal(ExponentialFamily):
@@ -68,12 +68,12 @@ class MultivariateNormal(ExponentialFamily):
             covariance = jnp.broadcast_to(covariance, (*batch_shape, dim, dim))
             if covariance.shape != (*batch_shape, dim, dim):
                 raise ValueError(f"Covariance shape {covariance.shape} must match loc batch shape")
-            P = qr_inv(covariance)
+            P = cho_inv(covariance)
         elif scale_tril is not None:
             scale_tril = jnp.broadcast_to(scale_tril, (*batch_shape, dim, dim))
             if scale_tril.shape != (*batch_shape, dim, dim):
                 raise ValueError(f"Scale_tril shape {scale_tril.shape} must match loc batch shape")
-            P = qr_inv(scale_tril @ scale_tril.mT)
+            P = cho_inv(scale_tril @ scale_tril.mT)
         else:
             # Default to identity matrix with proper broadcasting
             P = jnp.broadcast_to(jnp.eye(dim), (*batch_shape, dim, dim))
@@ -136,7 +136,7 @@ class MultivariateNormal(ExponentialFamily):
 
     @property
     def covariance(self) -> Array:
-        return self.apply_mask_matrix(qr_inv(-2.0 * self.nat2), zeromask=True)
+        return self.apply_mask_matrix(cho_inv(-2.0 * self.nat2), zeromask=True)
 
     @property
     def precision(self) -> Array:
