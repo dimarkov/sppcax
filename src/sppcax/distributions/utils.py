@@ -5,16 +5,17 @@ from jax.scipy.linalg import cholesky, solve, cho_factor, cho_solve
 from jax import jit
 
 
-from ..types import Array, Scalar
+from ..types import Array, Scalar, Matrix
 
 
-def symmetrize(matrix):
+def symmetrize(matrix: Matrix) -> Matrix:
     """Symmetrize one or more matrices."""
     return 0.5 * (matrix + jnp.swapaxes(matrix, -1, -2))
 
 
 @jit
-def cho_inv(matrix, diagonal_boost=1e-9):
+def cho_inv(matrix: Matrix, diagonal_boost: float = 1e-12) -> Matrix:
+    """Inversion of a positive-definite matrix"""
     identity = jnp.eye(matrix.shape[-1], dtype=matrix.dtype)
     chol = cho_factor(symmetrize(matrix) + diagonal_boost * identity, lower=True)
     return cho_solve(chol, jnp.broadcast_to(identity, matrix.shape))

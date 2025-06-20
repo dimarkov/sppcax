@@ -90,6 +90,8 @@ def kl_divergence(q: MVNIG, p: MVNIG):
         + jnp.sum(diff * (E_Precision @ diff[..., None]).squeeze(-1), axis=(-1, -2))
         - n * k
     )
-    kl_div2 -= 0.5 * jnp.linalg.slogdet(P)[1].sum()
+
+    # todo: find a better way to compute logdet if covariance has zero diagonal values due to masking
+    kl_div2 -= 0.5 * (jnp.linalg.slogdet(P_p)[1] - jnp.linalg.slogdet(q.precision)[1]).sum()
 
     return kl_div1 + kl_div2
