@@ -820,12 +820,11 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
                 sample_of_params.append(current_params)
                 elbos.append(elbo)
 
-            sample_of_params = pytree_stack(sample_of_params)
-            elbos = jnp.stack(elbos)
+            sample_of_params = pytree_stack(sample_of_params[burn_in:])
+            elbos = jnp.stack(elbos).squeeze()[burn_in:]
         else:
             _, (sample_of_params, elbos) = lax.scan(step_fn, carry, jnp.arange(sample_size))
+            sample_of_params = jtu.tree_map(lambda x: x[burn_in:], sample_of_params)
+            elbos = elbos.squeeze()[burn_in:]
 
-        if burn_in > 0:
-            return jtu.tree_map(lambda x: x[burn_in:], sample_of_params), elbos.squeeze()[burn_in:]
-        else:
-            return sample_of_params, elbos.squeeze()
+        return sample_of_params, elbos
