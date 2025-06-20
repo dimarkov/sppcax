@@ -17,7 +17,7 @@ def symmetrize(matrix):
 def cho_inv(matrix, diagonal_boost=1e-9):
     identity = jnp.eye(matrix.shape[-1], dtype=matrix.dtype)
     chol = cho_factor(symmetrize(matrix) + diagonal_boost * identity, lower=True)
-    return cho_solve(chol, identity)
+    return cho_solve(chol, jnp.broadcast_to(identity, matrix.shape))
 
 
 @jit
