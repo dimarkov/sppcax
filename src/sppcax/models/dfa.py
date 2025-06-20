@@ -40,6 +40,8 @@ from sppcax.inference.utils import ParamsLGSSMVB
 from sppcax.inference.smoothing import lgssm_smoother as sppcax_smoother
 from .factor_analysis_algorithms import _to_distribution
 
+from sppcax.metrics import kl_divergence
+
 
 def _mniw_posterior_update(dist, stats, props):
     # TODO: filter stats based on props
@@ -69,7 +71,7 @@ def _get_moments(dist):
     elif isinstance(dist, MultivariateNormalInverseGamma):
         mean = dist.mean
         # inverse of expected precision
-        covariance = jnp.eye(mean.shape[-2]) / dist.inv_gamma.expected_psi
+        covariance = jnp.diag(dist.expected_psi)
         return covariance, mean
 
     else:
@@ -283,11 +285,11 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         # Perform MAP estimation jointly
         initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props)
         S, m = initial_posterior.mode()
-        log_post = initial_posterior.log_prob([S, m])
+        kl_div = kl_divergence(initial_posterior, self.initial_prior)
 
         dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props)
         Q, FB = dynamics_posterior.mode()
-        log_post += dynamics_posterior.log_prob([Q, FB])
+        kl_div += kl_divergence(dynamics_posterior, self.dynamics_prior)
         F = FB[:, : self.state_dim]
         B, b = (
             (FB[:, self.state_dim : -1], FB[:, -1])
@@ -297,7 +299,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         emission_posterior = _posterior_update(self.emission_prior, emission_stats, props)
         R, HD = emission_posterior.mode()
-        log_post += emission_posterior.log_prob([R, HD])
+        kl_div += kl_divergence(emission_posterior, self.emission_prior)
         H = HD[:, : self.state_dim]
         D, d = (
             (HD[:, self.state_dim : -1], HD[:, -1])
@@ -310,7 +312,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             dynamics=ParamsLGSSMDynamics(weights=F, bias=b, input_weights=B, cov=Q),
             emissions=ParamsLGSSMEmissions(weights=H, bias=d, input_weights=D, cov=R),
         )
-        return params, log_post, m_step_state
+        return params, kl_div, m_step_state
 
     def e_step(
         self,
@@ -414,9 +416,11 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         # Perform MAP estimation jointly
         initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props)
+        kl_div = kl_divergence(initial_posterior, self.initial_prior)
         S, m = _get_moments(initial_posterior)
 
         emission_posterior = _posterior_update(self.emission_prior, emission_stats, props)
+        kl_div += kl_divergence(emission_posterior, self.emission_prior)
         R, HD = _get_moments(emission_posterior)
         H = HD[:, : self.state_dim]
         D, d = (
@@ -426,6 +430,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         )
 
         dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props)
+        kl_div += kl_divergence(dynamics_posterior, self.dynamics_prior)
         Q, FB = _get_moments(dynamics_posterior)
 
         F = FB[:, : self.state_dim]
@@ -434,9 +439,6 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             if self.has_dynamics_bias
             else (FB[:, self.state_dim :], jnp.zeros(self.state_dim))
         )
-
-        # TODO: Compute kl divergence
-        kl_div = 0.0
 
         # Get correction for Q, R
         C_em = _get_correction(emission_posterior)
@@ -573,21 +575,21 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         # TODO: figure out how to deal with (y, u) uncertainties in dynamax
 
         @jit
-        def em_step(params, log_post, m_step_state):
+        def em_step(params, kl_div, m_step_state):
             """Perform one EM step."""
             batch_stats, lls = vmap(partial(self.e_step, params))(batch_emissions, batch_inputs)
-            elbo = self.log_prior(params) + lls.sum() - log_post
-            params, log_post, m_step_state = self.m_step(params, props, batch_stats, m_step_state)
-            return params, log_post, elbo, m_step_state
+            elbo = lls.sum() - kl_div
+            params, kl_div, m_step_state = self.m_step(params, props, batch_stats, m_step_state)
+            return params, kl_div, elbo, m_step_state
 
         m_step_state = self.initialize_m_step_state(params, props)
-        log_post = 0.0
-        carry = (params, log_post, m_step_state)
+        kl_div = 0.0
+        carry = (params, kl_div, m_step_state)
 
         def step_fn(carry, *args):
-            params, log_post, m_step_state = carry
-            params, log_post, elbo, m_step_state = em_step(params, log_post, m_step_state)
-            return (params, log_post, m_step_state), elbo
+            params, kl_div, m_step_state = carry
+            params, kl_div, elbo, m_step_state = em_step(params, kl_div, m_step_state)
+            return (params, kl_div, m_step_state), elbo
 
         if verbose:
             pbar = progress_bar(range(num_iters)) if verbose else range(num_iters)
@@ -598,7 +600,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
                 params = carry[0]
             elbos = jnp.stack(elbos).squeeze()
         else:
-            (params, _, _), elbos = lax.scan(step_fn, (params, log_post, m_step_state), jnp.arange(num_iters))
+            (params, _, _), elbos = lax.scan(step_fn, (params, kl_div, m_step_state), jnp.arange(num_iters))
             elbos = elbos.squeeze()
 
         return params, elbos[1:]
@@ -653,7 +655,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         def em_step(params, kl_div, m_step_state):
             """Perform one EM step."""
             batch_stats, lls = vmap(partial(self.vbe_step, params))(batch_emissions, batch_inputs)
-            elbo = kl_div + lls.sum()
+            elbo = -kl_div + lls.sum()
             params, kl_div, m_step_state = self.vbm_step(params, props, batch_stats, m_step_state)
             return params, kl_div, elbo, m_step_state
 
@@ -748,12 +750,12 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             # Sample the initial params
             initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props)
             S, m = initial_posterior.sample(seed=next(rngs))
-            log_post = initial_posterior.log_prob([S, m])
+            kl_div = kl_divergence(initial_posterior, self.initial_prior)
 
             # Sample the dynamics params
             dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props)
             Q, FB = dynamics_posterior.sample(seed=next(rngs))
-            log_post += dynamics_posterior.log_prob([Q, FB])
+            kl_div += kl_divergence(dynamics_posterior, self.dynamics_prior)
             F = FB[:, : self.state_dim]
             B, b = (
                 (FB[:, self.state_dim : -1], FB[:, -1])
@@ -764,7 +766,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             # Sample the emission params
             emission_posterior = _posterior_update(self.emission_prior, emission_stats, props)
             R, HD = emission_posterior.sample(seed=next(rngs))
-            log_post += emission_posterior.log_prob([R, HD])
+            kl_div += kl_divergence(emission_posterior, self.emission_prior)
             H = HD[:, : self.state_dim]
             D, d = (
                 (HD[:, self.state_dim : -1], HD[:, -1])
@@ -778,9 +780,9 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
                 emissions=ParamsLGSSMEmissions(weights=H, bias=d, input_weights=D, cov=R),
             )
 
-            return params, log_post
+            return params, kl_div
 
-        def one_sample(_params, log_post, rng):
+        def one_sample(_params, kl_div, rng):
             """Sample a single set of states and compute their sufficient stats."""
             rngs = jr.split(rng, 2)
             # Sample latent states
@@ -794,7 +796,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
                 batch_keys, emissions=batch_emissions, inputs=batch_inputs
             )
 
-            elbo = batch_ll + self.log_prior(_params) - log_post
+            elbo = batch_ll.sum() - kl_div
             _batch_stats = vmap(sufficient_stats_from_sample)(batch_emissions, batch_inputs, batch_states)
             # Aggregate statistics from all observations.
             _stats = tree.map(lambda x: jnp.sum(x, axis=0), _batch_stats)
@@ -802,13 +804,13 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             return lgssm_params_sample(rngs[1], _stats), elbo
 
         def step_fn(carry, *args):
-            params, log_post, key = carry
+            params, kl_div, key = carry
             key, _key = jr.split(key)
-            (current_params, log_post), elbo = one_sample(params, log_post, _key)
-            return (current_params, log_post, key), (params, elbo)
+            (current_params, kl_div), elbo = one_sample(params, kl_div, _key)
+            return (current_params, kl_div, key), (params, elbo)
 
-        log_post = 0.0
-        carry = (initial_params, log_post, key)
+        kl_div = 0.0
+        carry = (initial_params, kl_div, key)
         if verbose:
             sample_of_params = []
             elbos = []
