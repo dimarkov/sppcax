@@ -56,3 +56,7 @@ MANIFEST
 # JAX specific
 .jax/
 *.jaxpr
+
+# Images
+
+*.png
