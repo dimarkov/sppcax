@@ -6,10 +6,98 @@ from jax import numpy as jnp
 from jax import random as jr
 from multipledispatch import dispatch
 
-from ..distributions import Beta, MultivariateNormal, Gamma
+from ..distributions import Beta, MultivariateNormal, Gamma, MultivariateNormalInverseGamma as MVNIG
 from ..models.factor_analysis_params import BayesianFactorAnalysisParams, PFA
 from ..types import PRNGKey
-from .delta_f import gibbs_sampler_mvn, gibbs_sampler_pfa
+from .delta_f import gibbs_sampler_mvn, gibbs_sampler_pfa, gibbs_sampler_mvnig
+
+from dynamax.utils.distributions import NormalInverseWishart as NIW
+
+
+@dispatch(NIW, NIW)
+def prune_params(post: NIW, prior: NIW, *, key: PRNGKey, max_iter: int = 4) -> NIW:
+    """Applies Bayesian model reduction to distribution, where Inverse Gamma priors
+    get optimized, and individual elements of the Multivariate Normal get pruned to
+    maximize change in the variational free energy, hence minimize the upper bound
+    on marginal log-likelihood.
+
+    Args:
+        post: Posterior MultivariateNormalInverseGamma distribution
+        prior: Prior MultivariateNormalInverseGamma distribution
+        key: Random number generator key
+        max_iter: Maximal number of iterations for the Gibbs sampler
+
+    Returns:
+        Optimized posterior MultivariateNormalInverseGamma distribution
+    """
+
+    # optimize Inverse Gamma priors and consequently posterior estimates
+
+    nu = post.df
+    nu_0 = prior.df
+    diff_scale = post.scale - prior.scale
+    new_scale = nu * diff_scale / (nu - nu_0)
+
+    opt_post = NIW(post.loc, post.mean_concentration, nu, new_scale)
+
+    # TODO: prune parameters
+    # Decide if we should to force a priori some latents to zero.
+
+    return opt_post
+
+
+@dispatch(MVNIG, MVNIG)
+def prune_params(post: MVNIG, prior: MVNIG, *, key: PRNGKey, max_iter: int = 10) -> MVNIG:  # noqa: F811
+    """Applies Bayesian model reduction to distribution, where Inverse Gamma priors
+    get optimized, and individual elements of the Multivariate Normal get pruned to
+    maximize change in the variational free energy, hence minimize the upper bound
+    on marginal log-likelihood.
+
+    Args:
+        post: Posterior MultivariateNormalInverseGamma distribution
+        prior: Prior MultivariateNormalInverseGamma distribution
+        key: Random number generator key
+        max_iter: Maximal number of iterations for the Gibbs sampler
+
+    Returns:
+        Optimized posterior MultivariateNormalInverseGamma distribution
+    """
+
+    # prune parameters
+    def step_fn(carry, t):
+        delta_f, mask, key = carry
+
+        alpha = 1.0 + mask.sum(0)
+        beta = 1.0 + (1 - mask).sum(0)
+
+        key, _key = jr.split(key)
+        pi = Beta(alpha, beta).sample(_key)
+
+        key, _key = jr.split(key)
+        delta_f, mask = gibbs_sampler_mvnig(_key, post, prior, pi, mask, delta_f)
+
+        return (delta_f, mask, key), delta_f
+
+    init = (jnp.zeros(post.batch_shape), prior.mvn.mask, key)
+    (last_df, mask, key), delta_fs = lax.scan(step_fn, init, jnp.arange(max_iter), unroll=2)
+
+    # correct beta parameter of inverse-gamma distribution
+    prior_nat1 = prior.mvn.nat1
+    pruned_prior_mean = (~mask) * prior.mvn.mean
+
+    post_nat1 = post.mvn.nat1
+    pruned_post_mean = (~mask) * post.mvn.mean
+
+    dnat2 = post.inv_gamma.dnat2
+    dnat2 -= jnp.sum(pruned_post_mean * post_nat1, -1) / 2
+    dnat2 += jnp.sum(pruned_prior_mean * prior_nat1, -1) / 2
+
+    # optimize Inverse Gamma priors
+    nat2_0 = jnp.minimum(dnat2 / (post.inv_gamma.alpha - 1), -1 / (post.inv_gamma.alpha - 1))
+    dnat2 = jnp.minimum(dnat2, 0.0)
+    opt_post = eqx.tree_at(lambda d: (d.mvn.mask, d.inv_gamma.nat2_0, d.inv_gamma.dnat2), post, (mask, nat2_0, dnat2))
+
+    return opt_post
 
 
 @dispatch(PFA)
