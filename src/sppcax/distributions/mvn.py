@@ -4,7 +4,7 @@ from typing import ClassVar, Optional
 
 import jax.numpy as jnp
 import jax.random as jr
-from jax.scipy.linalg import solve, solve_triangular
+from jax.scipy.linalg import solve, solve_triangular, cho_solve
 
 from ..types import Array, Matrix, PRNGKey, Shape, Vector
 from .exponential_family import ExponentialFamily
@@ -218,11 +218,10 @@ class MultivariateNormal(ExponentialFamily):
             Samples from the distribution.
         """
         precision = self.precision
-        # TODO: reduce number of inverse operations
-        mean = solve(precision, self.nat1, assume_a="pos")
 
         # Use Cholesky for sampling
         L = safe_cholesky(precision)
+        mean = cho_solve((L, True), self.nat1)
         L = jnp.broadcast_to(L, sample_shape + L.shape)
 
         # Generate standard normal samples and transform
