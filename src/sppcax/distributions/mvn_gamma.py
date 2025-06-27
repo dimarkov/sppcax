@@ -26,7 +26,6 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
     - Λ is a base precision matrix
     - σ² is a scalar variance parameter
     - α, β are Inverse-Gamma distribution parameters
-    \sigma^2
     """
 
     mvn: MultivariateNormal
@@ -205,13 +204,15 @@ def mvnig_posterior_update(mvnig_prior: MultivariateNormalInverseGamma, sufficie
     # compute parameters of the posterior distribution
     nat2_post = -0.5 * (prior_precision + SxxT)
     nat1_post = mvn_prior.apply_mask_vector(nat1 + SxyT.mT)
-    Syy = SyyT + mvn_prior.mean @ nat1.mT
+    Syy = jnp.diag(SyyT) + jnp.sum(mvn_prior.mean * nat1, -1)
 
     mvn_post = eqx.tree_at(lambda m: (m.nat1, m.nat2), mvnig_prior.mvn, (nat1_post, nat2_post))
     M_pos = mvn_post.mean
 
     dnat1 = -N / 2
-    dnat2 = -(jnp.diag(Syy - M_pos @ SxyT)) / 2
+
+    # shouldn't SxyT be nat1_post instead?
+    dnat2 = -(Syy - jnp.sum(M_pos * nat1_post, -1)) / 2
 
     inv_gamma_post = eqx.tree_at(lambda m: (m.dnat1, m.dnat2), mvnig_prior.inv_gamma, (dnat1, dnat2))
     mvnig_post = eqx.tree_at(lambda m: (m.mvn, m.inv_gamma), mvnig_prior, (mvn_post, inv_gamma_post))
