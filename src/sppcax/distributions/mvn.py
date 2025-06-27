@@ -4,7 +4,7 @@ from typing import ClassVar, Optional
 
 import jax.numpy as jnp
 import jax.random as jr
-from jax.scipy.linalg import solve, solve_triangular, cho_solve
+from jax.scipy.linalg import solve, solve_triangular
 
 from ..types import Array, Matrix, PRNGKey, Shape, Vector
 from .exponential_family import ExponentialFamily
@@ -221,12 +221,13 @@ class MultivariateNormal(ExponentialFamily):
 
         # Use Cholesky for sampling
         L = safe_cholesky(precision)
-        mean = cho_solve((L, True), self.nat1)
+        _eta = solve_triangular(L, self.nat1, lower=True)
         L = jnp.broadcast_to(L, sample_shape + L.shape)
 
         # Generate standard normal samples and transform
         shape = sample_shape + self.shape
         z = jr.normal(key, shape)
-        samples = mean + solve_triangular(L, z[..., None], trans=1, lower=True)[..., 0]
+        smpl = _eta + z
+        smpl = solve_triangular(L.mT, smpl[..., None], lower=False)[..., 0]
 
-        return self.apply_mask_vector(samples)
+        return self.apply_mask_vector(smpl)
