@@ -75,7 +75,7 @@ def kl_divergence(q: InverseGamma, p: InverseGamma):
 
 @dispatch(MVNIG, MVNIG)
 def kl_divergence(q: MVNIG, p: MVNIG):
-    kl_div1 = kl_divergence(q.inv_gamma, p.inv_gamma).sum()
+    kl_div1 = q.inv_gamma.kl_divergence_from_prior.sum()
 
     diff = p.mean - q.mean
     n, k = diff.shape
