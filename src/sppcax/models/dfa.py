@@ -41,6 +41,9 @@ from sppcax.inference.smoothing import lgssm_smoother as sppcax_smoother
 from .factor_analysis_algorithms import _to_distribution
 
 from sppcax.metrics import kl_divergence
+from sppcax.metrics.kl_divergence import multidigamma, digamma
+
+from sppcax.bmr import prune_params
 
 
 def _mniw_posterior_update(dist, stats, props):
@@ -78,6 +81,21 @@ def _get_moments(dist):
         raise NotImplementedError
 
 
+def _get_ll_correction(dist):
+    if isinstance(dist, MatrixNormalInverseWishart):
+        dim, _ = dist._matrix_normal_shape
+        x = dist.df / 2
+        return (multidigamma(x, dim) - dim * jnp.log(x)) / 2
+
+    elif isinstance(dist, MultivariateNormalInverseGamma):
+        # inverse of expected precision
+        alpha = dist.alpha
+        return jnp.sum(digamma(alpha) - jnp.log(alpha)) / 2
+
+    else:
+        raise NotImplementedError
+
+
 def _get_correction(dist):
     if isinstance(dist, MatrixNormalInverseWishart):
         dim, _ = dist._matrix_normal_shape
@@ -103,6 +121,12 @@ class ParamsLGSSM(NamedTuple):
     initial: ParamsLGSSMInitial
     dynamics: Union[ParamsLGSSMDynamics, ParamsLGSSMVB]
     emissions: Union[ParamsLGSSMEmissions, ParamsLGSSMVB]
+
+
+class ParamsBMR(NamedTuple):
+    initial: bool
+    dynamics: bool
+    emissions: bool
 
 
 class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
@@ -138,6 +162,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         has_dynamics_bias=True,
         has_emissions_bias=True,
         parallel_scan=False,
+        use_bmr=False,
         **kw_priors,
     ):
         super().__init__(
@@ -150,6 +175,11 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         )
 
         self.parallel_scan = parallel_scan
+
+        if use_bmr:
+            self.use_bmr = ParamsBMR(initial=True, dynamics=False, emissions=True)
+        else:
+            self.use_bmr = ParamsBMR(initial=False, dynamics=False, emissions=False)
 
     def initialize(
         self,
@@ -232,6 +262,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
                 input_weights=params.dynamics.input_weights,
                 cov=params.dynamics.cov,
                 correction=C_dyn,
+                ll=0.0,
             )
             emissions = ParamsLGSSMVB(
                 weights=params.emissions.weights,
@@ -239,6 +270,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
                 input_weights=params.emissions.input_weights,
                 cov=params.emissions.cov,
                 correction=C_em,
+                ll=0.0,
             )
 
             params = eqx.tree_at(lambda p: (p.dynamics, p.emissions), params, (dynamics, emissions))
@@ -263,7 +295,14 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         )
         return params, props
 
-    def m_step(self, params: ParamsLGSSM, props: ParamsLGSSM, batch_stats: SuffStatsLGSSM, m_step_state: Any):
+    def m_step(
+        self,
+        params: ParamsLGSSM,
+        props: ParamsLGSSM,
+        batch_stats: SuffStatsLGSSM,
+        m_step_state: Any,
+        key: PRNGKey = None,
+    ):
         """Perform the M-step of the EM algorithm.
 
         Note: This function currently ignores any `trainable` constraints specified
@@ -284,10 +323,18 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         # Perform MAP estimation jointly
         initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props)
+        if self.use_bmr.initial and key is not None:
+            key, _key = jr.split(key)
+            initial_posterior = prune_params(initial_posterior, self.initial_prior, key=_key)
+
         S, m = initial_posterior.mode()
         kl_div = kl_divergence(initial_posterior, self.initial_prior)
 
         dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props)
+        if self.use_bmr.dynamics and key is not None:
+            key, _key = jr.split(key)
+            dynamics_posterior = prune_params(dynamics_posterior, self.dynamics_prior, key=_key)
+
         Q, FB = dynamics_posterior.mode()
         kl_div += kl_divergence(dynamics_posterior, self.dynamics_prior)
         F = FB[:, : self.state_dim]
@@ -298,6 +345,9 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         )
 
         emission_posterior = _posterior_update(self.emission_prior, emission_stats, props)
+        if self.use_bmr.emissions and key is not None:
+            key, _key = jr.split(key)
+            emission_posterior = prune_params(emission_posterior, self.emission_prior, key=_key)
         R, HD = emission_posterior.mode()
         kl_div += kl_divergence(emission_posterior, self.emission_prior)
         H = HD[:, : self.state_dim]
@@ -394,7 +444,12 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         return (init_stats, dynamics_stats, emission_stats), posterior.marginal_loglik
 
     def vbm_step(
-        self, params: ParamsLGSSM, props: ParamsLGSSM, batch_stats: SuffStatsLGSSM, m_step_state: Any
+        self,
+        params: ParamsLGSSM,
+        props: ParamsLGSSM,
+        batch_stats: SuffStatsLGSSM,
+        m_step_state: Any,
+        key: PRNGKey = None,
     ) -> Tuple[ParamsLGSSM, Any]:
         """Perform the variational M-step of the VBEM algorithm.
 
@@ -416,10 +471,18 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         # Perform MAP estimation jointly
         initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props)
+        if self.use_bmr.initial and key is not None:
+            key, _key = jr.split(key)
+            initial_posterior = prune_params(initial_posterior, self.initial_prior, key=_key)
+
         kl_div = kl_divergence(initial_posterior, self.initial_prior)
         S, m = _get_moments(initial_posterior)
 
         emission_posterior = _posterior_update(self.emission_prior, emission_stats, props)
+        if self.use_bmr.emissions and key is not None:
+            key, _key = jr.split(key)
+            emission_posterior = prune_params(emission_posterior, self.emission_prior, key=_key)
+
         kl_div += kl_divergence(emission_posterior, self.emission_prior)
         R, HD = _get_moments(emission_posterior)
         H = HD[:, : self.state_dim]
@@ -430,6 +493,10 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         )
 
         dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props)
+        if self.use_bmr.dynamics and key is not None:
+            key, _key = jr.split(key)
+            dynamics_posterior = prune_params(dynamics_posterior, self.dynamics_prior, key=_key)
+
         kl_div += kl_divergence(dynamics_posterior, self.dynamics_prior)
         Q, FB = _get_moments(dynamics_posterior)
 
@@ -444,10 +511,13 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         C_em = _get_correction(emission_posterior)
         C_dyn = _get_correction(dynamics_posterior)
 
+        ll_const_em = _get_ll_correction(emission_posterior)
+        ll_const_dyn = _get_ll_correction(dynamics_posterior)
+
         params = ParamsLGSSM(
             initial=ParamsLGSSMInitial(mean=m, cov=S),
-            dynamics=ParamsLGSSMVB(weights=F, bias=b, input_weights=B, cov=Q, correction=C_dyn),
-            emissions=ParamsLGSSMVB(weights=H, bias=d, input_weights=D, cov=R, correction=C_em),
+            dynamics=ParamsLGSSMVB(weights=F, bias=b, input_weights=B, cov=Q, correction=C_dyn, ll=ll_const_dyn),
+            emissions=ParamsLGSSMVB(weights=H, bias=d, input_weights=D, cov=R, correction=C_em, ll=ll_const_em),
         )
         return params, kl_div, m_step_state
 
@@ -575,21 +645,22 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         # TODO: figure out how to deal with (y, u) uncertainties in dynamax
 
         @jit
-        def em_step(params, kl_div, m_step_state):
+        def em_step(params, kl_div, m_step_state, key):
             """Perform one EM step."""
             batch_stats, lls = vmap(partial(self.e_step, params))(batch_emissions, batch_inputs)
             elbo = lls.sum() - kl_div
-            params, kl_div, m_step_state = self.m_step(params, props, batch_stats, m_step_state)
+            params, kl_div, m_step_state = self.m_step(params, props, batch_stats, m_step_state, key=key)
             return params, kl_div, elbo, m_step_state
 
         m_step_state = self.initialize_m_step_state(params, props)
         kl_div = 0.0
-        carry = (params, kl_div, m_step_state)
+        carry = (params, kl_div, m_step_state, key)
 
         def step_fn(carry, *args):
-            params, kl_div, m_step_state = carry
-            params, kl_div, elbo, m_step_state = em_step(params, kl_div, m_step_state)
-            return (params, kl_div, m_step_state), elbo
+            params, kl_div, m_step_state, key = carry
+            key, _key = jr.split(key)
+            params, kl_div, elbo, m_step_state = em_step(params, kl_div, m_step_state, _key)
+            return (params, kl_div, m_step_state, key), elbo
 
         if verbose:
             pbar = progress_bar(range(num_iters)) if verbose else range(num_iters)
@@ -600,7 +671,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
                 params = carry[0]
             elbos = jnp.stack(elbos).squeeze()
         else:
-            (params, _, _), elbos = lax.scan(step_fn, (params, kl_div, m_step_state), jnp.arange(num_iters))
+            (params, *_), elbos = lax.scan(step_fn, carry, jnp.arange(num_iters))
             elbos = elbos.squeeze()
 
         return params, elbos[1:]
@@ -652,21 +723,22 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             batch_inputs = None
         # TODO: figure out how to deal with (y, u) uncertainties in dynamax
 
-        def em_step(params, kl_div, m_step_state):
+        def em_step(params, kl_div, m_step_state, key):
             """Perform one EM step."""
             batch_stats, lls = vmap(partial(self.vbe_step, params))(batch_emissions, batch_inputs)
             elbo = -kl_div + lls.sum()
-            params, kl_div, m_step_state = self.vbm_step(params, props, batch_stats, m_step_state)
+            params, kl_div, m_step_state = self.vbm_step(params, props, batch_stats, m_step_state, key=key)
             return params, kl_div, elbo, m_step_state
 
         m_step_state = self.initialize_m_step_state(params, props)
         kl_div = 0.0
-        carry = (params, kl_div, m_step_state)
+        carry = (params, kl_div, m_step_state, key)
 
         def step_fn(carry, *args):
-            params, kl_div, m_step_state = carry
-            params, kl_div, elbo, m_step_state = em_step(params, kl_div, m_step_state)
-            return (params, kl_div, m_step_state), elbo
+            params, kl_div, m_step_state, key = carry
+            key, _key = jr.split(key)
+            params, kl_div, elbo, m_step_state = em_step(params, kl_div, m_step_state, _key)
+            return (params, kl_div, m_step_state, key), elbo
 
         if verbose:
             pbar = progress_bar(range(num_iters)) if verbose else range(num_iters)
@@ -677,7 +749,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
                 params = carry[0]
             elbos = jnp.stack(elbos)
         else:
-            (params, _, _), elbos = lax.scan(step_fn, (params, kl_div, m_step_state), jnp.arange(num_iters))
+            (params, *_), elbos = lax.scan(step_fn, carry, jnp.arange(num_iters))
 
         return params, elbos.squeeze()[1:]
 
@@ -715,7 +787,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         def sufficient_stats_from_sample(y, inputs, states):
             """Convert samples of states to sufficient statistics."""
-            inputs_joint = jnp.concatenate((inputs, jnp.ones((num_timesteps, 1))), axis=1)
+            inputs_joint = jnp.pad(inputs, [(0, 0), (0, 1)], constant_values=1.0)
             # Let xn[t] = x[t+1]          for t = 0...T-2
             x, xp, xn = states, states[:-1], states[1:]
             u, up = inputs_joint, inputs_joint[:-1]
@@ -745,17 +817,27 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         def lgssm_params_sample(rng, stats):
             """Sample parameters of the model given sufficient statistics from observed states and emissions."""
             init_stats, dynamics_stats, emission_stats = stats
-            rngs = iter(jr.split(rng, 3))
 
             # Sample the initial params
             initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props)
-            S, m = initial_posterior.sample(seed=next(rngs))
+            if self.use_bmr.initial:
+                rng, key = jr.split(rng)
+                initial_posterior = prune_params(initial_posterior, self.initial_prior, key=key)
             kl_div = kl_divergence(initial_posterior, self.initial_prior)
+
+            rng, key = jr.split(rng)
+            S, m = initial_posterior.sample(seed=key)
 
             # Sample the dynamics params
             dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props)
-            Q, FB = dynamics_posterior.sample(seed=next(rngs))
+            if self.use_bmr.dynamics:
+                rng, key = jr.split(rng)
+                dynamics_posterior = prune_params(dynamics_posterior, self.dynamics_prior, key=key)
+
             kl_div += kl_divergence(dynamics_posterior, self.dynamics_prior)
+
+            rng, key = jr.split(rng)
+            Q, FB = dynamics_posterior.sample(seed=key)
             F = FB[:, : self.state_dim]
             B, b = (
                 (FB[:, self.state_dim : -1], FB[:, -1])
@@ -765,8 +847,15 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
             # Sample the emission params
             emission_posterior = _posterior_update(self.emission_prior, emission_stats, props)
-            R, HD = emission_posterior.sample(seed=next(rngs))
+            if self.use_bmr.emissions:
+                rng, key = jr.split(rng)
+                emission_posterior = prune_params(emission_posterior, self.emission_prior, key=key)
+
             kl_div += kl_divergence(emission_posterior, self.emission_prior)
+
+            rng, key = jr.split(rng)
+            R, HD = emission_posterior.sample(seed=key)
+
             H = HD[:, : self.state_dim]
             D, d = (
                 (HD[:, self.state_dim : -1], HD[:, -1])
