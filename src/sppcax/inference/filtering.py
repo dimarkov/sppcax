@@ -28,6 +28,32 @@ def _slogdet_lu(lu: Array, pivot: Array) -> tuple[Array, Array]:
     return logdet
 
 
+def correct_for_vb(mean, cov, u, C, dim) -> tuple[Array, Array]:
+    _C = jnp.eye(dim) + cov @ C[:dim, :dim]
+    lup = lu_factor(_C)
+
+    # terms needed for log-likelihood correction
+    cho_l = cho_factor(cov)
+
+    # natural parameter
+    eta = cho_solve(cho_l, mean)
+
+    # correcting mean and covariancezs
+    pred_cov = lu_solve(lup, cov)
+    f = jnp.pad(u, ([0, 1]), constant_values=1.0)
+    u_contrib = C[:dim, dim:] @ f
+    pred_mean = lu_solve(lup, mean - cov @ u_contrib)
+
+    # correction of log-likelihood due to variational expectation of model parameters
+    ll_corr = 0.5 * jnp.inner(pred_mean - mean, eta)
+    ll_corr -= 0.5 * jnp.inner(pred_mean, u_contrib)
+    ll_corr -= 0.5 * _slogdet_lu(*lup)
+
+    ll_corr -= 0.5 * jnp.sum(C[dim:, dim:] * (f[..., None] * f))
+
+    return pred_mean, pred_cov, ll_corr
+
+
 # TODO: Check if we can write vb filter in associative scan
 @preprocess_args
 def lgssm_filter(
@@ -70,23 +96,14 @@ def lgssm_filter(
         u = inputs[t]
         y = emissions[t]
 
+        # TODO: Add corrections for Tr(Cyzz^t) where z = (x, u, 1)
+
         # correct for uncertainty of H, <H^TRH>=H^TRH + Cy in VBE step
         if variational_bayes:
-            C = jnp.eye(dim) + pred_cov @ Cy[..., :dim, :dim]
-            lup = lu_factor(C)
-
-            # terms needed for log-likelihood correction
-            cho_l = cho_factor(pred_cov)
-            pred_eta = cho_solve(cho_l, pred_mean)
-
-            # correcting mean and covariancezs
-            pred_cov = lu_solve(lup, pred_cov)
-            _pred_mean = lu_solve(lup, pred_mean)
-
-            # correction of log-likelihood due to variational expectation of model parameters
-            ll += 0.5 * jnp.inner(pred_mean - _pred_mean, pred_eta) + _slogdet_lu(*lup)
-
-            pred_mean = _pred_mean
+            pred_mean, pred_cov, ll_corr = correct_for_vb(pred_mean, pred_cov, u, Cy, dim)
+            # correction of log-likelihood
+            # ll_const_y = 0.5 * (mvgamma(df_y/2) + dim * (jnp.log(2) - jnp.log(df_y))) for inverse wishart dist
+            ll += ll_corr + params.emissions.ll
 
         # Update the log likelihood
         ll += _log_likelihood(pred_mean, pred_cov, H, D, d, R, u, y)
@@ -96,19 +113,9 @@ def lgssm_filter(
 
         # correct for uncertainty of F, <F^TQF>=F^TQF + Cx in VBE step
         if variational_bayes:
-            C = jnp.eye(dim) + filtered_cov @ Cx[..., :dim, :dim]
-            lup = lu_factor(C)
-
-            # terms needed for log-likelihood correction
-            cho_l = cho_factor(filtered_cov)
-            filtered_eta = cho_solve(cho_l, filtered_mean)
-
-            filtered_cov = lu_solve(lup, filtered_cov)
-            _filtered_mean = lu_solve(lup, filtered_mean)
-
-            # correction of log-likelihood due to variational expectation of model parameters
-            ll += 0.5 * jnp.inner(filtered_mean - _filtered_mean, filtered_eta) + _slogdet_lu(*lup)
-            filtered_mean = _filtered_mean
+            filtered_mean, filtered_cov, ll_corr = correct_for_vb(filtered_mean, filtered_cov, u, Cx, dim)
+            # correction of log-likelihood
+            ll += ll_corr + params.dynamics.ll
 
         # Predict the next state
         pred_mean, pred_cov = _predict(filtered_mean, filtered_cov, F, B, b, Q, u)

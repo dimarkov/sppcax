@@ -37,6 +37,7 @@ class ParamsLGSSMVB(NamedTuple):
     input_weights: Union[ParameterProperties, Float[Array, "..."]]  # noqa F772
     cov: Union[ParameterProperties, Float[Array, "..."]]  # noqa F772
     correction: Union[ParameterProperties, Float[Array, "..."]]  # noqa F772
+    ll: float
 
 
 # Helper functions
