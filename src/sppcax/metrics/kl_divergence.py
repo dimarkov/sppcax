@@ -11,7 +11,7 @@ tfd = tfp.distributions
 
 def multidigamma(a, p):
     k = (1 - jnp.arange(1, p + 1)) / 2
-    return jnp.sum(digamma(a[..., None] + k), axis=-1)
+    return jnp.sum(digamma(jnp.expand_dims(a, -1) + k), axis=-1)
 
 
 @dispatch(InverseWishart, InverseWishart)
