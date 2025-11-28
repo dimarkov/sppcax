@@ -48,17 +48,30 @@ from sppcax.bmr import prune_params
 
 def _mniw_posterior_update(dist, stats, props):
     # TODO: filter stats based on props
+    if not (props.mean.trainable and props.cov.trainable):
+        return dist
+
     return mniw_posterior_update(dist, stats)
+
+
+def _mvnig_posterior_update(dist, stats, props):
+    if not (props.mean.trainable and props.cov.trainable):
+        return dist
+
+    return mvnig_posterior_update(dist, stats, props)
 
 
 def _niw_posterior_update(dist, stats, props):
     # TODO: filter stats based on props
+    if not (props.mean.trainable and props.cov.trainable):
+        return dist
+
     return niw_posterior_update(dist, stats)
 
 
 def _posterior_update(dist, stats, props):
     if isinstance(dist, MultivariateNormalInverseGamma):
-        return mvnig_posterior_update(dist, stats, props)
+        return _mvnig_posterior_update(dist, stats, props)
     elif isinstance(dist, MatrixNormalInverseWishart):
         return _mniw_posterior_update(dist, stats, props)
     else:
@@ -220,11 +233,11 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         _initial_covariance = jnp.eye(self.state_dim)
         _dynamics_weights = 0.99 * jnp.eye(self.state_dim)
         _dynamics_input_weights = jnp.zeros((self.state_dim, self.input_dim))
-        _dynamics_bias = jnp.zeros((self.state_dim,)) if self.has_dynamics_bias else None
+        _dynamics_bias = jnp.zeros((self.state_dim,))
         _dynamics_covariance = 0.1 * jnp.eye(self.state_dim)
         _emission_weights = jr.normal(key, (self.emission_dim, self.state_dim))
         _emission_input_weights = jnp.zeros((self.emission_dim, self.input_dim))
-        _emission_bias = jnp.zeros((self.emission_dim,)) if self.has_emissions_bias else None
+        _emission_bias = jnp.zeros((self.emission_dim,))
         _emission_covariance = 0.1 * jnp.eye(self.emission_dim)
 
         # Only use the values above if the user hasn't specified their own
@@ -322,7 +335,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         init_stats, dynamics_stats, emission_stats = stats
 
         # Perform MAP estimation jointly
-        initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props)
+        initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props.initial)
         if self.use_bmr.initial and key is not None:
             key, _key = jr.split(key)
             initial_posterior = prune_params(initial_posterior, self.initial_prior, key=_key)
@@ -330,7 +343,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         S, m = initial_posterior.mode()
         kl_div = kl_divergence(initial_posterior, self.initial_prior)
 
-        dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props)
+        dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props.dynamics)
         if self.use_bmr.dynamics and key is not None:
             key, _key = jr.split(key)
             dynamics_posterior = prune_params(dynamics_posterior, self.dynamics_prior, key=_key)
@@ -344,7 +357,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             else (FB[:, self.state_dim :], jnp.zeros(self.state_dim))
         )
 
-        emission_posterior = _posterior_update(self.emission_prior, emission_stats, props)
+        emission_posterior = _posterior_update(self.emission_prior, emission_stats, props.emissions)
         if self.use_bmr.emissions and key is not None:
             key, _key = jr.split(key)
             emission_posterior = prune_params(emission_posterior, self.emission_prior, key=_key)
@@ -470,7 +483,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         init_stats, dynamics_stats, emission_stats = stats
 
         # Perform MAP estimation jointly
-        initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props)
+        initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props.initial)
         if self.use_bmr.initial and key is not None:
             key, _key = jr.split(key)
             initial_posterior = prune_params(initial_posterior, self.initial_prior, key=_key)
@@ -478,7 +491,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         kl_div = kl_divergence(initial_posterior, self.initial_prior)
         S, m = _get_moments(initial_posterior)
 
-        emission_posterior = _posterior_update(self.emission_prior, emission_stats, props)
+        emission_posterior = _posterior_update(self.emission_prior, emission_stats, props.emissions)
         if self.use_bmr.emissions and key is not None:
             key, _key = jr.split(key)
             emission_posterior = prune_params(emission_posterior, self.emission_prior, key=_key)
@@ -492,7 +505,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             else (HD[:, self.state_dim :], jnp.zeros(self.emission_dim))
         )
 
-        dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props)
+        dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props.dynamics)
         if self.use_bmr.dynamics and key is not None:
             key, _key = jr.split(key)
             dynamics_posterior = prune_params(dynamics_posterior, self.dynamics_prior, key=_key)
@@ -605,7 +618,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         key: PRNGKey,
         U: Union[Matrix, Distribution] = None,  # inputs/controls
         num_iters: int = 100,
-        verbose: bool = True,
+        verbose: bool = False,
     ) -> Tuple[ParameterSet, Vector]:
         r"""Compute parameter MLE/ MAP estimate using Expectation-Maximization (EM).
 
@@ -819,7 +832,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             init_stats, dynamics_stats, emission_stats = stats
 
             # Sample the initial params
-            initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props)
+            initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props.initial)
             if self.use_bmr.initial:
                 rng, key = jr.split(rng)
                 initial_posterior = prune_params(initial_posterior, self.initial_prior, key=key)
@@ -829,7 +842,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             S, m = initial_posterior.sample(seed=key)
 
             # Sample the dynamics params
-            dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props)
+            dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props.dynamics)
             if self.use_bmr.dynamics:
                 rng, key = jr.split(rng)
                 dynamics_posterior = prune_params(dynamics_posterior, self.dynamics_prior, key=key)
@@ -846,7 +859,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             )
 
             # Sample the emission params
-            emission_posterior = _posterior_update(self.emission_prior, emission_stats, props)
+            emission_posterior = _posterior_update(self.emission_prior, emission_stats, props.emissions)
             if self.use_bmr.emissions:
                 rng, key = jr.split(rng)
                 emission_posterior = prune_params(emission_posterior, self.emission_prior, key=key)
