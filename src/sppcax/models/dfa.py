@@ -48,14 +48,14 @@ from sppcax.bmr import prune_params
 
 def _mniw_posterior_update(dist, stats, props):
     # TODO: filter stats based on props
-    if not (props.mean.trainable and props.cov.trainable):
+    if not (props.weights.trainable and props.cov.trainable):
         return dist
 
     return mniw_posterior_update(dist, stats)
 
 
 def _mvnig_posterior_update(dist, stats, props):
-    if not (props.mean.trainable and props.cov.trainable):
+    if not (props.weights.trainable and props.cov.trainable):
         return dist
 
     return mvnig_posterior_update(dist, stats, props)
