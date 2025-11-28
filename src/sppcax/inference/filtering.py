@@ -41,15 +41,18 @@ def correct_for_vb(mean, cov, u, C, dim) -> tuple[Array, Array]:
     # correcting mean and covariancezs
     pred_cov = lu_solve(lup, cov)
     f = jnp.pad(u, ([0, 1]), constant_values=1.0)
-    u_contrib = C[:dim, dim:] @ f
-    pred_mean = lu_solve(lup, mean - cov @ u_contrib)
+    if dim > C.shape[-1]:
+        u_contrib = C[:dim, dim:] @ f
+        pred_mean = lu_solve(lup, mean - cov @ u_contrib)
+        ll_corr = -0.5 * jnp.sum(C[dim:, dim:] * (f[..., None] * f))
+        ll_corr -= 0.5 * jnp.inner(pred_mean, u_contrib)
+    else:
+        pred_mean = lu_solve(lup, mean)
+        ll_corr = 0.0
 
     # correction of log-likelihood due to variational expectation of model parameters
-    ll_corr = 0.5 * jnp.inner(pred_mean - mean, eta)
-    ll_corr -= 0.5 * jnp.inner(pred_mean, u_contrib)
+    ll_corr += 0.5 * jnp.inner(pred_mean - mean, eta)
     ll_corr -= 0.5 * _slogdet_lu(*lup)
-
-    ll_corr -= 0.5 * jnp.sum(C[dim:, dim:] * (f[..., None] * f))
 
     return pred_mean, pred_cov, ll_corr
 
