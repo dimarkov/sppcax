@@ -1,9 +1,9 @@
-"""Example of using PPCA with synthetic data."""
+"""Example of using BayesianPCA (unified model) with synthetic data."""
 
 import jax.numpy as jnp
 import jax.random as jr
 import matplotlib.pyplot as plt
-from sppcax.models import PPCA
+from sppcax.models import BayesianPCA
 
 
 def generate_synthetic_data(key: jr.PRNGKey, n_samples: int = 1000):
@@ -18,7 +18,6 @@ def generate_synthetic_data(key: jr.PRNGKey, n_samples: int = 1000):
         W: True loading matrix.
         Z: True latent variables.
     """
-    # True parameters
     n_features, n_components = 10, 2
     key1, key2, key3 = jr.split(key, 3)
 
@@ -38,37 +37,41 @@ def generate_synthetic_data(key: jr.PRNGKey, n_samples: int = 1000):
 
 
 def main():
-    """Run PPCA example."""
-    # Generate synthetic data
+    """Run BayesianPCA example."""
     key = jr.PRNGKey(0)
     X, W_true, Z_true = generate_synthetic_data(key)
     n_samples, n_features = X.shape
     n_components = W_true.shape[1]
 
-    # Fit PPCA model
-    model = PPCA(n_components=n_components, n_features=n_features, random_state=key)
-    Z_est = model.fit_transform(X)
+    # Create and fit BayesianPCA model (PCA = FA with isotropic noise = DFA with F=0, Q=I, R=sigma^2*I)
+    model = BayesianPCA(n_components=n_components, n_features=n_features, key=key)
+    params, props = model.initialize(key)
+    params, elbos = model.fit_em(params, props, X, key=key, num_iters=50, verbose=False)
+
+    # Transform: project data to latent space
+    qz = model.transform(params, X)
+
+    # Inverse transform: reconstruct observations
+    X_recon = model.inverse_transform(params, qz)
 
     # Plot results
     plt.figure(figsize=(15, 5))
 
-    # Plot true latent space
     plt.subplot(131)
     plt.scatter(Z_true[:, 0], Z_true[:, 1], alpha=0.5)
     plt.title("True Latent Space")
     plt.xlabel("Component 1")
     plt.ylabel("Component 2")
 
-    # Plot estimated latent space
     plt.subplot(132)
-    plt.scatter(Z_est[:, 0], Z_est[:, 1], alpha=0.5)
+    plt.scatter(qz.mean[:, 0], qz.mean[:, 1], alpha=0.5)
     plt.title("Estimated Latent Space")
     plt.xlabel("Component 1")
     plt.ylabel("Component 2")
 
-    # Plot loading matrix comparison
     plt.subplot(133)
-    plt.imshow(jnp.abs(jnp.corrcoef(W_true.T, model.W_.T)), cmap="coolwarm")
+    W_est = params.emissions.weights  # (D, K)
+    plt.imshow(jnp.abs(jnp.corrcoef(W_true.T, W_est.T)), cmap="coolwarm")
     plt.title("Loading Matrix Correlation")
     plt.colorbar()
 
@@ -76,15 +79,9 @@ def main():
     plt.show()
 
     # Print model statistics
-    X_rec = model.inverse_transform(Z_est)
-    mse = jnp.mean(jnp.square(X - X_rec))
+    mse = jnp.mean(jnp.square(X - X_recon.mean))
     print(f"Reconstruction MSE: {mse:.4f}")
-
-    # Compute explained variance
-    X_centered = X - model.mean_
-    total_var = jnp.var(X_centered, axis=0).sum()
-    explained_var = jnp.sum(jnp.square(model.W_))
-    print(f"Explained variance ratio: {explained_var/total_var:.4f}")
+    print(f"Final ELBO: {elbos[-1]:.2f}")
 
 
 if __name__ == "__main__":

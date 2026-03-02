@@ -9,7 +9,7 @@ from multipledispatch import dispatch
 from ..distributions import Beta, MultivariateNormal, Gamma, MultivariateNormalInverseGamma as MVNIG
 from ..models.factor_analysis_params import BayesianFactorAnalysisParams, PFA
 from ..types import PRNGKey
-from .delta_f import gibbs_sampler_mvn, gibbs_sampler_pfa, gibbs_sampler_mvnig
+from .delta_f import gibbs_sampler_mvn, gibbs_sampler_pfa, gibbs_sampler_mvnig, gibbs_sampler_with_ard
 
 from dynamax.utils.distributions import NormalInverseWishart as NIW
 
@@ -47,7 +47,7 @@ def prune_params(post: NIW, prior: NIW, *, key: PRNGKey, max_iter: int = 4) -> N
 
 
 @dispatch(MVNIG, MVNIG)
-def prune_params(post: MVNIG, prior: MVNIG, *, key: PRNGKey, max_iter: int = 10) -> MVNIG:  # noqa: F811
+def prune_params(post: MVNIG, prior: MVNIG, *, key: PRNGKey, max_iter: int = 10, ard_prior=None) -> MVNIG:  # noqa: F811
     """Applies Bayesian model reduction to distribution, where Inverse Gamma priors
     get optimized, and individual elements of the Multivariate Normal get pruned to
     maximize change in the variational free energy, hence minimize the upper bound
@@ -58,6 +58,9 @@ def prune_params(post: MVNIG, prior: MVNIG, *, key: PRNGKey, max_iter: int = 10)
         prior: Prior MultivariateNormalInverseGamma distribution
         key: Random number generator key
         max_iter: Maximal number of iterations for the Gibbs sampler
+        ard_prior: Optional ARD Gamma prior over column precisions. When provided,
+            uses ARD-aware Gibbs sampler that accounts for column precision in
+            the free energy change computation.
 
     Returns:
         Optimized posterior MultivariateNormalInverseGamma distribution
@@ -74,7 +77,10 @@ def prune_params(post: MVNIG, prior: MVNIG, *, key: PRNGKey, max_iter: int = 10)
         pi = Beta(alpha, beta).sample(_key)
 
         key, _key = jr.split(key)
-        delta_f, mask = gibbs_sampler_mvnig(_key, post, prior, pi, mask, delta_f)
+        if ard_prior is not None:
+            delta_f, mask = gibbs_sampler_with_ard(_key, post, ard_prior, pi, mask, delta_f)
+        else:
+            delta_f, mask = gibbs_sampler_mvnig(_key, post, prior, pi, mask, delta_f)
 
         return (delta_f, mask, key), delta_f
 
@@ -143,7 +149,7 @@ def reduce_model(model: PFA, *, key: PRNGKey, max_iter: int = 4) -> PFA:
     updated_q_tau = eqx.tree_at(lambda x: x.dnat1, model.q_tau, dnat1_tau)
 
     # Update q(psi) rate parameter based on pruned components
-    dnat2_psi = model.q_w_psi.gamma.dnat2  # Start with original rate parameter
+    dnat2_psi = model.q_w_psi.inv_gamma.dnat2  # Start with original rate parameter
     pruned_mask_diff = (
         model.q_w_psi.mvn.mask.astype(jnp.int8) - lam
     )  # Identify pruned elements (1 where pruned, 0 otherwise)
@@ -151,10 +157,10 @@ def reduce_model(model: PFA, *, key: PRNGKey, max_iter: int = 4) -> PFA:
 
     # Adjust rate parameter by removing contribution of pruned elements' variance
     dnat2_psi -= 0.5 * (tilde_mu[..., None, :] @ (model.q_w_psi.mvn.covariance @ tilde_mu[..., None])).squeeze((-1, -2))
-    updated_q_psi = eqx.tree_at(lambda x: x.dnat2, model.q_w_psi.gamma, dnat2_psi)
+    updated_q_psi = eqx.tree_at(lambda x: x.dnat2, model.q_w_psi.inv_gamma, dnat2_psi)
 
     # Combine updated mvn and psi into q_w_psi
-    updated_q_w_psi = eqx.tree_at(lambda x: (x.mvn, x.gamma), model.q_w_psi, (updated_mvn, updated_q_psi))
+    updated_q_w_psi = eqx.tree_at(lambda x: (x.mvn, x.inv_gamma), model.q_w_psi, (updated_mvn, updated_q_psi))
 
     # Update the final model state
     model = eqx.tree_at(

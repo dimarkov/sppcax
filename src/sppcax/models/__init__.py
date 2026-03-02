@@ -2,6 +2,7 @@
 
 from .factor_analysis_algorithms import compute_elbo, e_step, fit, inverse_transform, m_step, transform
 from .factor_analysis_params import PFA, PPCA
+from .factor_analysis import BayesianFactorAnalysis, BayesianPCA
 from .dfa import BayesianDynamicFactorAnalysis
 
 # from .mixed_likelihood_vbpca import MixedLikelihoodVBPCA
@@ -9,6 +10,8 @@ from .dfa import BayesianDynamicFactorAnalysis
 __all__ = [
     "PPCA",
     "PFA",
+    "BayesianFactorAnalysis",
+    "BayesianPCA",
     "BayesianDynamicFactorAnalysis",
     # "MixedLikelihoodVBPCA",
     "e_step",

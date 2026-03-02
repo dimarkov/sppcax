@@ -139,7 +139,9 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
             (\sigma^2)* = \beta / (\alpha + (D + 2)/2)
         """
         dim = self.event_shape[-1]
-        return jnp.eye(len(self.beta)) * (self.beta / (self.alpha + (dim + 2) / 2)), self.mean
+        sigma_sqr_mode = self.beta / (self.alpha + (dim + 2) / 2)
+        n = self.batch_shape[0] if self.batch_shape else 1
+        return jnp.eye(n) * jnp.broadcast_to(sigma_sqr_mode, (n,))[:, None], self.mean
 
     @property
     def alpha(self) -> Array:
@@ -213,6 +215,12 @@ def mvnig_posterior_update(mvnig_prior: MultivariateNormalInverseGamma, sufficie
 
     # shouldn't SxyT be nat1_post instead?
     dnat2 = -(Syy - jnp.sum(M_pos * nat1_post, -1)) / 2
+
+    # For isotropic noise (PCA), sum dnat across features since all share one variance
+    if mvnig_prior.inv_gamma.batch_shape == ():
+        D = dnat2.shape[0]
+        dnat1 = dnat1 * D
+        dnat2 = dnat2.sum()
 
     inv_gamma_post = eqx.tree_at(lambda m: (m.dnat1, m.dnat2), mvnig_prior.inv_gamma, (dnat1, dnat2))
     mvnig_post = eqx.tree_at(lambda m: (m.mvn, m.inv_gamma), mvnig_prior, (mvn_post, inv_gamma_post))

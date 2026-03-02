@@ -98,33 +98,34 @@ def gibbs_sampler_mvnig(
     return new_delta_f, new_lam
 
 
-def gibbs_sampler_pfa(key: PRNGKey, model: PFA, pi: Scalar, lam: Matrix, delta_f: Vector) -> Tuple[Vector, Matrix]:
-    """Sample sparsity matrix lambda based on the local change in the variational free energy.
+def gibbs_sampler_with_ard(
+    key: PRNGKey, q_w_psi: MVNIG, q_tau, pi: Scalar, lam: Matrix, delta_f: Vector
+) -> Tuple[Vector, Matrix]:
+    """Sample sparsity matrix lambda with ARD (Automatic Relevance Determination).
 
-    For each element in the loading matrix, calculates the change in free energy that would result
-    from setting its prior mean to zero and prior precision to infinity (effectively pruning the parameter).
+    Like gibbs_sampler_mvnig but additionally accounts for the ARD column precision
+    (q_tau) when computing changes in variational free energy.
 
     Args:
-        model: Probabilistic Factor Analysis
+        key: PRNGkey used for sampling
+        q_w_psi: Posterior MVNIG distribution over emission weights and noise
+        q_tau: ARD Gamma prior over column precisions
         pi: Prior probability of element being pruned out.
-        lam: Current sparisty matrix
+        lam: Current sparsity matrix
         delta_f: Change in the variational free energy for the rows of the current sparsity matrix
 
     Returns:
         A tuple of new delta F values for each dimension d, and a new sparsity matrix
     """
-
-    # Posterior distributions q(W, psi) and q(tau)
-    posterior = model.q_w_psi  # This is MultivariateNormalGamma q(W, psi)
-    rho = posterior.gamma  # This is Gamma q(psi)
-    q_tau = model.q_tau
+    rho = q_w_psi.inv_gamma  # InverseGamma q(psi)
 
     # Extract parameters
-    mask = posterior.mvn.mask  # initial mask over loading matrix
-    lm_mean = posterior.mvn.mean  # loading matrix mean
-    lm_prec = posterior.mvn.precision  # loading matrix precision
+    mask = q_w_psi.mvn.mask  # initial mask over loading matrix
+    lm_mean = q_w_psi.mvn.mean  # loading matrix mean
+    lm_prec = q_w_psi.mvn.precision  # loading matrix precision
     eta = jnp.log(pi) - jnp.log(1 - pi)
-    D, K = lam.shape
+    # Only iterate over ARD columns (not bias/input columns)
+    n_ard = len(q_tau.alpha)
 
     def step_fn(carry, k):
         lam, delta_f, key = carry
@@ -132,7 +133,8 @@ def gibbs_sampler_pfa(key: PRNGKey, model: PFA, pi: Scalar, lam: Matrix, delta_f
         _lam_k = lam[:, k]
         lam = mask * lam.at[:, k].set(~_lam_k)
         pruned = mask.astype(jnp.int8) - lam
-        r = pruned.sum(0)
+        r = pruned[:, :n_ard].sum(0)  # only count ARD columns
+        D = pruned.shape[0]
         ln_c_d = ln_c(q_tau.alpha, q_tau.beta, r).sum() / D
         delta_f_d = vmap(compute_delta_f, in_axes=(0, 0, 0, 0, 0, None))(
             pruned, lm_mean, lm_prec, rho.alpha, rho.beta, ln_c_d
@@ -150,9 +152,14 @@ def gibbs_sampler_pfa(key: PRNGKey, model: PFA, pi: Scalar, lam: Matrix, delta_f
         return (lam, delta_f, key), None
 
     init = (lam, delta_f, key)
-    (new_lam, new_delta_f, _), _ = lax.scan(step_fn, init, jnp.arange(K))
+    (new_lam, new_delta_f, _), _ = lax.scan(step_fn, init, jnp.arange(n_ard))
 
     return new_delta_f, new_lam
+
+
+def gibbs_sampler_pfa(key: PRNGKey, model: PFA, pi: Scalar, lam: Matrix, delta_f: Vector) -> Tuple[Vector, Matrix]:
+    """Legacy wrapper: Sample sparsity matrix for PFA model (delegates to gibbs_sampler_with_ard)."""
+    return gibbs_sampler_with_ard(key, model.q_w_psi, model.q_tau, pi, lam, delta_f)
 
 
 def compute_delta_f_mvn(pruned, mean, prec) -> Array:

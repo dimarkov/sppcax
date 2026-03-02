@@ -1,5 +1,11 @@
-"""Bayesian Factor Analysis parameter containers."""
+"""Bayesian Factor Analysis parameter containers.
 
+.. deprecated::
+    Use :class:`sppcax.models.factor_analysis.BayesianFactorAnalysis` and
+    :class:`sppcax.models.factor_analysis.BayesianPCA` instead.
+"""
+
+import warnings
 from typing import Optional
 
 import equinox as eqx
@@ -134,7 +140,11 @@ class BayesianFactorAnalysisParams(eqx.Module):
 
 
 class PPCA(BayesianFactorAnalysisParams):
-    """Probabilistic Principal Component Analysis (parameter container)."""
+    """Probabilistic Principal Component Analysis (parameter container).
+
+    .. deprecated::
+        Use :class:`sppcax.models.factor_analysis.BayesianPCA` instead.
+    """
 
     def __init__(
         self,
@@ -153,16 +163,11 @@ class PPCA(BayesianFactorAnalysisParams):
         *,
         key: Optional[PRNGKey] = None,
     ):
-        """Initialize PPCA model parameters.
-
-        Args:
-            n_components: Number of components
-            n_features: Number of features
-            data_mask: Optional boolean array indicating which features are observed (True) or missing (False)
-                      Shape should match input data (n_samples, n_features). If None, all features are observed.
-            key: A `jax.random.PRNGKey` used to provide randomness for parameter
-            initialisation. (Keyword only argument.)
-        """
+        warnings.warn(
+            "PPCA is deprecated. Use sppcax.models.BayesianPCA instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         super().__init__(
             n_components=n_components,
             n_features=n_features,
@@ -182,7 +187,11 @@ class PPCA(BayesianFactorAnalysisParams):
 
 
 class PFA(BayesianFactorAnalysisParams):
-    """Probabilistic Factor Analysis with per-feature noise (parameter container)."""
+    """Probabilistic Factor Analysis with per-feature noise (parameter container).
+
+    .. deprecated::
+        Use :class:`sppcax.models.factor_analysis.BayesianFactorAnalysis` instead.
+    """
 
     def __init__(
         self,
@@ -201,16 +210,11 @@ class PFA(BayesianFactorAnalysisParams):
         *,
         key: Optional[PRNGKey] = None,
     ):
-        """Initialize Factor Analysis model parameters.
-
-        Args:
-            n_components: Number of components
-            n_features: Number of features
-            data_mask: Optional boolean array indicating which features are observed (True) or missing (False)
-                      Shape should match input data (n_samples, n_features). If None, all features are observed.
-            key: A `jax.random.PRNGKey` used to provide randomness for parameter
-            initialisation. (Keyword only argument.)
-        """
+        warnings.warn(
+            "PFA is deprecated. Use sppcax.models.BayesianFactorAnalysis instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         super().__init__(
             n_components=n_components,
             n_features=n_features,

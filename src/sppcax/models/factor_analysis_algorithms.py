@@ -1,5 +1,10 @@
-"""Bayesian Factor Analysis algorithm implementations."""
+"""Bayesian Factor Analysis algorithm implementations.
 
+.. deprecated::
+    Use :class:`sppcax.models.BayesianFactorAnalysis` and its methods instead.
+"""
+
+import warnings
 from typing import List, Tuple, Union, Optional
 
 import equinox as eqx
@@ -281,7 +286,15 @@ def fit(
     Returns:
         model: Fitted model instance
         elbos: a list of elbo values at each iteration step
+
+    .. deprecated::
+        Use BayesianFactorAnalysis.fit_em() or BayesianFactorAnalysis.fit_vbem() instead.
     """
+    warnings.warn(
+        "fit() is deprecated. Use BayesianFactorAnalysis.fit_em() or .fit_vbem() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     # Convert input to distribution if needed
     X_dist = _to_distribution(X)
     U_dist = _to_distribution(U) if U is not None else None
@@ -335,8 +348,15 @@ def transform(
 
     Returns:
         qz: Posterior estimate of the latents as MultivariateNormal distribution
-    """
 
+    .. deprecated::
+        Use BayesianFactorAnalysis.transform() instead.
+    """
+    warnings.warn(
+        "transform() is deprecated. Use BayesianFactorAnalysis.transform() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     X_dist = _to_distribution(X)
     U_dist = _to_distribution(U) if U is not None else None
     return e_step(model, X_dist, U=U_dist, use_data_mask=use_data_mask, use_bmr=use_bmr, key=key)
@@ -380,7 +400,15 @@ def inverse_transform(
 
     Returns:
         X_original: Prediction of the data as a MultivariateNormal distribution
+
+    .. deprecated::
+        Use BayesianFactorAnalysis.inverse_transform() instead.
     """
+    warnings.warn(
+        "inverse_transform() is deprecated. Use BayesianFactorAnalysis.inverse_transform() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     Z_dist = _to_distribution(Z)
     W = model.q_w_psi.mvn.mean.mT
     mean, _ = get_mean(model, U)
@@ -532,7 +560,15 @@ def compute_elbo(
 
     Returns:
         ELBO value
+
+    .. deprecated::
+        ELBO is computed internally by BayesianFactorAnalysis.fit_em() and .fit_vbem().
     """
+    warnings.warn(
+        "compute_elbo() is deprecated. ELBO is computed internally by BayesianFactorAnalysis.fit_em().",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     # Expected log likelihood E[log p(X | Z, W, psi)]
     exp_ll = _expected_log_likelihood(model, X, U, qz)
 
