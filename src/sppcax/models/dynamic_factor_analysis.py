@@ -198,7 +198,8 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         self.isotropic_noise = isotropic_noise
 
         if use_bmr:
-            self.use_bmr = ParamsBMR(initial=True, dynamics=False, emissions=True)
+            # For static models, initial distribution is fixed z~N(0,I) — no BMR needed
+            self.use_bmr = ParamsBMR(initial=not is_static, dynamics=False, emissions=True)
         else:
             self.use_bmr = ParamsBMR(initial=False, dynamics=False, emissions=False)
 
@@ -208,6 +209,8 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
                 alpha0=0.5 * jnp.ones(state_dim),
                 beta0=0.5 * jnp.ones(state_dim),
             )
+        else:
+            self.ard_prior = None
 
         # Sparsity prior for BMR Gibbs sampling
         if has_sparsity_prior:
@@ -269,10 +272,9 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         # Initialize emission weights from MVNIG prior if available
         if isinstance(self.emission_prior, MultivariateNormalInverseGamma):
             # MVNIG mean has shape (D, K+U+bias), extract H part
-            _emission_weights = self.emission_prior.mean[:, :self.state_dim]
-            _emission_covariance = jnp.diag(jnp.broadcast_to(
-                1.0 / self.emission_prior.expected_psi, (self.emission_dim,)
-            ))
+            key, _key = jr.split(key)
+            _emission_covariance, mean = self.emission_prior.sample(_key)
+            _emission_weights = mean[:, :self.state_dim]
         else:
             _emission_weights = jr.normal(key, (self.emission_dim, self.state_dim))
             _emission_covariance = 0.1 * jnp.eye(self.emission_dim)
@@ -329,11 +331,13 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             params = eqx.tree_at(lambda p: (p.dynamics, p.emissions), params, (dynamics, emissions))
 
         # The keys of param_props must match those of params!
-        # In static mode, dynamics are fixed (non-trainable)
+        # In static mode, dynamics and initial distribution are fixed (non-trainable)
         dynamics_trainable = not self.is_static
+        initial_trainable = not self.is_static
         props = ParamsLGSSM(
             initial=ParamsLGSSMInitial(
-                mean=ParameterProperties(), cov=ParameterProperties(constrainer=RealToPSDBijector())
+                mean=ParameterProperties(trainable=initial_trainable),
+                cov=ParameterProperties(trainable=initial_trainable, constrainer=RealToPSDBijector()),
             ),
             dynamics=ParamsLGSSMDynamics(
                 weights=ParameterProperties(trainable=dynamics_trainable),
@@ -382,16 +386,27 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             key, _key = jr.split(key)
             initial_posterior = prune_params(initial_posterior, self.initial_prior, key=_key)
 
-        S, m = initial_posterior.mode()
-        kl_div = kl_divergence(initial_posterior, self.initial_prior)
+        if props.initial.mean.trainable and props.initial.cov.trainable:
+            S, m = initial_posterior.mode()
+            kl_div = kl_divergence(initial_posterior, self.initial_prior)
+        else:
+            m, S = params.initial.mean, params.initial.cov
+            kl_div = 0
 
         dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props.dynamics)
         if self.use_bmr.dynamics and key is not None:
             key, _key = jr.split(key)
             dynamics_posterior = prune_params(dynamics_posterior, self.dynamics_prior, key=_key)
 
-        Q, FB = dynamics_posterior.mode()
-        kl_div += kl_divergence(dynamics_posterior, self.dynamics_prior)
+        if props.dynamics.weights.trainable and props.dynamics.cov.trainable:
+            Q, FB = dynamics_posterior.mode()
+            kl_div += kl_divergence(dynamics_posterior, self.dynamics_prior)
+        else:
+            Q = params.dynamics.cov
+            FB = jnp.column_stack([params.dynamics.weights, params.dynamics.input_weights])
+            if self.has_dynamics_bias:
+                FB = jnp.column_stack([FB, params.dynamics.bias[:, None]])
+        
         F = FB[:, : self.state_dim]
         B, b = (
             (FB[:, self.state_dim : -1], FB[:, -1])
@@ -399,24 +414,34 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             else (FB[:, self.state_dim :], jnp.zeros(self.state_dim))
         )
 
-        emission_posterior = _posterior_update(self.emission_prior, emission_stats, props.emissions)
+        # Apply ARD tau to emission prior (uses tau from previous iteration)
+        if self.has_ard and isinstance(self.emission_prior, MultivariateNormalInverseGamma):
+            emission_prior = self._apply_ard_to_emission_prior(self.emission_prior, m_step_state)
+        else:
+            emission_prior = self.emission_prior
+
+        emission_posterior = _posterior_update(emission_prior, emission_stats, props.emissions)
+
+        # ARD update: compute tau prior updates for next iteration
+        if self.has_ard and isinstance(emission_posterior, MultivariateNormalInverseGamma):
+            ard_updates = self._compute_ard_updates(emission_posterior, self.state_dim)
+            ard_post = eqx.tree_at(lambda d: (d.dnat1, d.dnat2), self.ard_prior, ard_updates)
+            kl_div += ard_post.kl_divergence_from_prior.sum()
+            m_step_state = ard_post
+
         if self.use_bmr.emissions and key is not None:
             key, _key = jr.split(key)
-            ard = self.ard_prior if self.has_ard else None
-            emission_posterior = prune_params(emission_posterior, self.emission_prior, key=_key, ard_prior=ard)
+            ard = ard_post if self.has_ard else None
+            emission_posterior = prune_params(emission_posterior, emission_prior, key=_key, ard_post=ard)
+
         R, HD = emission_posterior.mode()
-        kl_div += kl_divergence(emission_posterior, self.emission_prior)
+        kl_div += kl_divergence(emission_posterior, emission_prior)            
         H = HD[:, : self.state_dim]
         D, d = (
             (HD[:, self.state_dim : -1], HD[:, -1])
             if self.has_emissions_bias
             else (HD[:, self.state_dim :], jnp.zeros(self.emission_dim))
         )
-
-        # ARD update: compute tau prior updates (returned in m_step_state, applied outside JIT)
-        if self.has_ard and isinstance(emission_posterior, MultivariateNormalInverseGamma):
-            ard_updates = self._compute_ard_updates(emission_posterior, self.state_dim)
-            m_step_state = ard_updates
 
         params = ParamsLGSSM(
             initial=ParamsLGSSMInitial(mean=m, cov=S),
@@ -442,6 +467,29 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         dnat2_tau = -0.5 * jnp.sum((sigma_sqr_w + jnp.square(W_emission)) * exp_psi[..., None], 0)
 
         return dnat1_tau, dnat2_tau
+
+    def _apply_ard_to_emission_prior(self, emission_prior, m_step_state):
+        """Modify emission prior precision by incorporating ARD tau from previous iteration.
+
+        Reconstructs the ARD posterior from m_step_state, computes E[tau], and adds it
+        to the diagonal of the emission prior's precision matrix (first K elements only).
+        Only nat2 is modified — ARD is a zero-centered shrinkage prior.
+
+        Returns:
+            Tuple of (modified_prior, ard_dist).
+        """
+        ard_dist = m_step_state
+        E_tau = ard_dist.mean  # (K,)
+        K = len(E_tau)
+
+        loc = emission_prior.mvn.mean
+        precision = emission_prior.mvn.precision
+        precision = precision.at[:, :K, :K].set(jnp.diag(E_tau))
+        mask = emission_prior.mvn.mask
+        mvn = MultivariateNormal(loc=loc, precision=precision, mask=mask)
+
+        modified_prior = eqx.tree_at(lambda p: p.mvn, emission_prior, mvn)
+        return modified_prior
 
     def transform(
         self,
@@ -528,103 +576,6 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         covariance = jnp.diag(R_diag) + HZH
         return MultivariateNormal(loc=loc, covariance=covariance)
 
-    def _static_e_step(
-        self,
-        params: ParamsLGSSM,
-        emissions: Float[Array, "num_timesteps emission_dim"],  # noqa F772
-        inputs: Optional[Float[Array, "num_timesteps input_dim"]] = None,  # noqa F772
-    ) -> Tuple[SuffStatsLGSSM, Scalar]:
-        """Efficient E-step for static (FA/PCA) case using QR decomposition.
-
-        When F=0, Q=I, each latent z_t is independent ~ N(0,I), and the E-step
-        reduces to the standard FA posterior computation, which is much faster
-        than the Kalman smoother (~60-100x on CPU for typical sizes).
-
-        Returns sufficient statistics in DFA format for compatibility with m_step.
-        """
-        from jax.scipy.linalg import solve_triangular
-
-        num_timesteps = emissions.shape[0]
-        if inputs is None:
-            inputs = jnp.zeros((num_timesteps, 0))
-
-        H = params.emissions.weights  # (D, K)
-        d = params.emissions.bias     # (D,)
-        R = params.emissions.cov      # (D, D) or diagonal
-        D_in = params.emissions.input_weights  # (D, U)
-
-        # Compute emission mean offset
-        mean_offset = d
-        if inputs.shape[-1] > 0:
-            mean_offset = mean_offset + inputs @ D_in.T
-
-        # Center observations
-        y_centered = emissions - mean_offset  # (N, D)
-
-        # Noise precision (handle diagonal case)
-        if R.ndim == 2:
-            R_inv_diag = 1.0 / jnp.diag(R)
-        else:
-            R_inv_diag = 1.0 / R
-
-        sqrt_noise_precision = jnp.sqrt(R_inv_diag)  # (D,)
-
-        # Posterior precision: P = I + H^T R^{-1} H
-        scaled_H = H * sqrt_noise_precision[:, None]  # (D, K)
-        P = scaled_H.T @ scaled_H + jnp.eye(self.state_dim)  # (K, K)
-
-        # Solve for posterior mean using QR
-        q, r = jnp.linalg.qr(P)
-        q_inv = q.T
-
-        # Ez = P^{-1} H^T R^{-1} y_centered
-        rhs = (y_centered * R_inv_diag) @ H  # (N, K)
-        Ez = solve_triangular(r, q_inv @ rhs.T).T  # (N, K)
-
-        # Posterior covariance: V = P^{-1}
-        V = jnp.linalg.inv(P)  # (K, K) - same for all samples
-
-        # Compute marginal log-likelihood
-        _, logdet_P = jnp.linalg.slogdet(P)
-        log_R_inv = jnp.sum(jnp.log(R_inv_diag))
-        ll = -0.5 * num_timesteps * self.emission_dim * jnp.log(2 * jnp.pi)
-        ll += 0.5 * num_timesteps * log_R_inv
-        ll -= 0.5 * num_timesteps * logdet_P
-        # Quadratic term: sum_n y_n^T R^{-1} y_n - Ez_n^T P Ez_n
-        quad_y = jnp.sum(y_centered ** 2 * R_inv_diag)
-        quad_z = jnp.sum(Ez @ P * Ez)
-        ll -= 0.5 * (quad_y - quad_z)
-
-        # Convert to DFA sufficient statistics format
-        # init_stats: trivial since z~N(0,I)
-        Ex0 = jnp.zeros(self.state_dim)
-        Ex0x0T = jnp.eye(self.state_dim)
-        init_stats = (Ex0, Ex0x0T, 1)
-
-        # dynamics_stats: trivial since F=0, Q=I are fixed
-        K = self.state_dim
-        if self.has_dynamics_bias:
-            dim_zp = K + self.input_dim + 1
-        else:
-            dim_zp = K + self.input_dim
-        sum_zpzpT = jnp.eye(dim_zp) * (num_timesteps - 1)
-        sum_zpxnT = jnp.zeros((dim_zp, K))
-        sum_xnxnT = jnp.eye(K) * (num_timesteps - 1)
-        dynamics_stats = (sum_zpzpT, sum_zpxnT, sum_xnxnT, num_timesteps - 1)
-
-        # emission_stats: the actual sufficient statistics
-        Ezz = V * num_timesteps + Ez.T @ Ez  # (K, K)
-        u = jnp.concatenate((inputs, jnp.ones((num_timesteps, 1))), axis=1)
-
-        sum_zzT = jnp.block([[Ezz, Ez.T @ u], [u.T @ Ez, u.T @ u]])
-        sum_zyT = jnp.block([[Ez.T @ emissions], [u.T @ emissions]])
-        sum_yyT = emissions.T @ emissions
-        emission_stats = (sum_zzT, sum_zyT, sum_yyT, num_timesteps)
-        if not self.has_emissions_bias:
-            emission_stats = (sum_zzT[:-1, :-1], sum_zyT[:-1, :], sum_yyT, num_timesteps)
-
-        return (init_stats, dynamics_stats, emission_stats), ll
-
     def e_step(
         self,
         params: ParamsLGSSM,
@@ -653,11 +604,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         if inputs is None:
             inputs = jnp.zeros((num_timesteps, 0))
 
-        if self.is_static:
-            return self._static_e_step(params, emissions, inputs)
-
         # Run the smoother to get posterior expectations
-        # posterior = lgssm_smoother(params, emissions, inputs, variational_bayes=False)
         if self.parallel_scan:
             posterior = parallel_dynamax_lgssm_smoother(params, emissions, inputs)
         else:
@@ -734,21 +681,39 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         init_stats, dynamics_stats, emission_stats = stats
 
         # Perform MAP estimation jointly
-        initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props.initial)
-        if self.use_bmr.initial and key is not None:
-            key, _key = jr.split(key)
-            initial_posterior = prune_params(initial_posterior, self.initial_prior, key=_key)
+        if props.initial.mean.trainable or props.initial.cov.trainable:
+            initial_posterior = _niw_posterior_update(self.initial_prior, init_stats, props.initial)
+            if self.use_bmr.initial and key is not None:
+                key, _key = jr.split(key)
+                initial_posterior = prune_params(initial_posterior, self.initial_prior, key=_key)
 
-        kl_div = kl_divergence(initial_posterior, self.initial_prior)
-        S, m = _get_moments(initial_posterior)
+            kl_div = kl_divergence(initial_posterior, self.initial_prior)
+            S, m = _get_moments(initial_posterior)
+        else:
+            kl_div = 0
+            m, S = params.initial.mean, params.initial.cov
 
-        emission_posterior = _posterior_update(self.emission_prior, emission_stats, props.emissions)
+        # Apply ARD tau to emission prior (uses tau from previous iteration)
+        if self.has_ard and isinstance(self.emission_prior, MultivariateNormalInverseGamma):
+            emission_prior = self._apply_ard_to_emission_prior(self.emission_prior, m_step_state)
+        else:
+            emission_prior = self.emission_prior
+
+        emission_posterior = _posterior_update(emission_prior, emission_stats, props.emissions)
+
         if self.use_bmr.emissions and key is not None:
             key, _key = jr.split(key)
-            ard = self.ard_prior if self.has_ard else None
-            emission_posterior = prune_params(emission_posterior, self.emission_prior, key=_key, ard_prior=ard)
+            emission_posterior = prune_params(emission_posterior, emission_prior, key=_key)
 
-        kl_div += kl_divergence(emission_posterior, self.emission_prior)
+        kl_div += kl_divergence(emission_posterior, emission_prior)
+
+        # ARD update: compute tau prior updates before BMR pruning
+        if self.has_ard and isinstance(emission_posterior, MultivariateNormalInverseGamma):
+            ard_updates = self._compute_ard_updates(emission_posterior, self.state_dim)
+            ard_post = eqx.tree_at(lambda d: (d.dnat1, d.dnat2), self.ard_prior, ard_updates)
+            kl_div += ard_post.kl_divergence_from_prior.sum()
+            m_step_state = ard_post
+        
         R, HD = _get_moments(emission_posterior)
         H = HD[:, : self.state_dim]
         D, d = (
@@ -757,18 +722,25 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             else (HD[:, self.state_dim :], jnp.zeros(self.emission_dim))
         )
 
-        # ARD update: compute tau prior updates (returned in m_step_state, applied outside JIT)
-        if self.has_ard and isinstance(emission_posterior, MultivariateNormalInverseGamma):
-            ard_updates = self._compute_ard_updates(emission_posterior, self.state_dim)
-            m_step_state = ard_updates
+        if props.dynamics.weights.trainable or props.dynamics.cov.trainable:
+            dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props.dynamics)
+            if self.use_bmr.dynamics and key is not None:
+              key, _key = jr.split(key)
+              dynamics_posterior = prune_params(dynamics_posterior, self.dynamics_prior, key=_key)
 
-        dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props.dynamics)
-        if self.use_bmr.dynamics and key is not None:
-            key, _key = jr.split(key)
-            dynamics_posterior = prune_params(dynamics_posterior, self.dynamics_prior, key=_key)
-
-        kl_div += kl_divergence(dynamics_posterior, self.dynamics_prior)
-        Q, FB = _get_moments(dynamics_posterior)
+            kl_div += kl_divergence(dynamics_posterior, self.dynamics_prior)
+        
+            Q, FB = _get_moments(dynamics_posterior)
+                
+            C_dyn = _get_correction(dynamics_posterior)
+            ll_const_dyn = _get_ll_correction(dynamics_posterior)
+        else:
+            Q = params.dynamics.cov
+            FB = jnp.column_stack([params.dynamics.weights, params.dynamics.input_weights])
+            if self.has_dynamics_bias:
+                FB = jnp.column_stack([FB, params.dynamics.bias[:, None]])
+            C_dyn = params.dynamics.correction
+            ll_const_dyn = params.dynamics.ll
 
         F = FB[:, : self.state_dim]
         B, b = (
@@ -779,10 +751,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         # Get correction for Q, R
         C_em = _get_correction(emission_posterior)
-        C_dyn = _get_correction(dynamics_posterior)
-
         ll_const_em = _get_ll_correction(emission_posterior)
-        ll_const_dyn = _get_ll_correction(dynamics_posterior)
 
         params = ParamsLGSSM(
             initial=ParamsLGSSMInitial(mean=m, cov=S),
@@ -819,11 +788,6 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         num_timesteps = emissions.shape[0]
         if inputs is None:
             inputs = jnp.zeros((num_timesteps, 0))
-
-        # In static mode, VB corrections are irrelevant for dynamics (F=0, Q=I).
-        # The emission VB corrections are handled in the VB M-step.
-        if self.is_static:
-            return self._static_e_step(params, emissions, inputs)
 
         # Run the smoother to get posterior expectations
         posterior = sppcax_smoother(params, emissions, inputs, variational_bayes=True, parallel_scan=self.parallel_scan)
@@ -877,16 +841,8 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         state = super().initialize_m_step_state(params, props)
         if self.has_ard:
             # Initialize ARD updates as zeros with correct shape for lax.scan compatibility
-            return (jnp.zeros(self.state_dim), jnp.zeros(self.state_dim))
+            return self.ard_prior
         return state
-
-    def _apply_ard_updates(self, m_step_state):
-        """Apply ARD updates from m_step_state to self.ard_prior (must be called outside JIT)."""
-        if self.has_ard and m_step_state is not None:
-            dnat1_tau, dnat2_tau = m_step_state
-            self.ard_prior = eqx.tree_at(
-                lambda x: (x.dnat1, x.dnat2), self.ard_prior, (dnat1_tau, dnat2_tau)
-            )
 
     def fit_em(
         self,
@@ -926,14 +882,21 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         Ey = Y_dist.mean if hasattr(Y, "mean") else Y_dist.location
 
         # Make sure the emissions and inputs have batch dimensions
-        batch_emissions = ensure_array_has_batch_dim(Ey, self.emission_shape)
-
-        if U_dist is not None:
-            Eu = U_dist.mean if hasattr(U, "mean") else U_dist.location
-            batch_inputs = ensure_array_has_batch_dim(Eu, self.inputs_shape)
+        if self.is_static:
+            # Each observation is an independent batch of T=1
+            batch_emissions = Ey[:, None, :]  # (N, 1, D)
+            if U_dist is not None:
+                Eu = U_dist.mean if hasattr(U, "mean") else U_dist.location
+                batch_inputs = Eu[:, None, :] if Eu.ndim == 2 else Eu
+            else:
+                batch_inputs = jnp.zeros((Ey.shape[0], 1, 0))
         else:
-            batch_inputs = None
-        # TODO: figure out how to deal with (y, u) uncertainties in dynamax
+            batch_emissions = ensure_array_has_batch_dim(Ey, self.emission_shape)
+            if U_dist is not None:
+                Eu = U_dist.mean if hasattr(U, "mean") else U_dist.location
+                batch_inputs = ensure_array_has_batch_dim(Eu, self.inputs_shape)
+            else:
+                batch_inputs = None
 
         @jit
         def em_step(params, kl_div, m_step_state, key):
@@ -967,7 +930,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             elbos = elbos.squeeze()
 
         # Apply ARD updates outside JIT
-        self._apply_ard_updates(m_step_state)
+        self.ard_prior = m_step_state
 
         return params, elbos[1:]
 
@@ -979,7 +942,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         key: PRNGKey,
         U: Union[Matrix, Distribution] = None,  # inputs/controls
         num_iters: int = 100,
-        verbose: bool = True,
+        verbose: bool = False,
     ) -> Tuple[ParameterSet, Vector]:
         r"""Compute parameter MLE/ MAP estimate using Expectation-Maximization (EM).
 
@@ -1009,14 +972,20 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         Ey = Y_dist.mean if hasattr(Y, "mean") else Y_dist.location
 
         # Make sure the emissions and inputs have batch dimensions
-        batch_emissions = ensure_array_has_batch_dim(Ey, self.emission_shape)
-
-        if U_dist is not None:
-            Eu = U_dist.mean if hasattr(U, "mean") else U_dist.location
-            batch_inputs = ensure_array_has_batch_dim(Eu, self.inputs_shape)
+        if self.is_static:
+            batch_emissions = Ey[:, None, :]  # (N, 1, D)
+            if U_dist is not None:
+                Eu = U_dist.mean if hasattr(U, "mean") else U_dist.location
+                batch_inputs = Eu[:, None, :] if Eu.ndim == 2 else Eu
+            else:
+                batch_inputs = jnp.zeros((Ey.shape[0], 1, 0))
         else:
-            batch_inputs = None
-        # TODO: figure out how to deal with (y, u) uncertainties in dynamax
+            batch_emissions = ensure_array_has_batch_dim(Ey, self.emission_shape)
+            if U_dist is not None:
+                Eu = U_dist.mean if hasattr(U, "mean") else U_dist.location
+                batch_inputs = ensure_array_has_batch_dim(Eu, self.inputs_shape)
+            else:
+                batch_inputs = None
 
         def em_step(params, kl_div, m_step_state, key):
             """Perform one EM step."""
@@ -1048,7 +1017,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             (params, _, m_step_state, _), elbos = lax.scan(step_fn, carry, jnp.arange(num_iters))
 
         # Apply ARD updates outside JIT
-        self._apply_ard_updates(m_step_state)
+        self.ard_prior = m_step_state
 
         return params, elbos.squeeze()[1:]
 

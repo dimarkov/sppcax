@@ -45,11 +45,11 @@ class Gamma(ExponentialFamily):
         super().__init__(batch_shape=batch_shape, event_shape=())
 
         # Convert to natural parameters
-        self.nat1_0 = shape - 1  # α-1
+        self.nat1_0 = jnp.broadcast_to(shape - 1, self.batch_shape)  # α-1
         self.nat2_0 = jnp.broadcast_to(-rate, self.batch_shape)  # -β
 
         # Broadcast parameters
-        self.dnat1 = jnp.zeros(())
+        self.dnat1 = jnp.zeros(self.batch_shape)
         self.dnat2 = jnp.zeros(self.batch_shape)
 
     @property

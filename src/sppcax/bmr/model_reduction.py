@@ -47,7 +47,7 @@ def prune_params(post: NIW, prior: NIW, *, key: PRNGKey, max_iter: int = 4) -> N
 
 
 @dispatch(MVNIG, MVNIG)
-def prune_params(post: MVNIG, prior: MVNIG, *, key: PRNGKey, max_iter: int = 10, ard_prior=None) -> MVNIG:  # noqa: F811
+def prune_params(post: MVNIG, prior: MVNIG, *, key: PRNGKey, max_iter: int = 10, ard_post=None) -> MVNIG:  # noqa: F811
     """Applies Bayesian model reduction to distribution, where Inverse Gamma priors
     get optimized, and individual elements of the Multivariate Normal get pruned to
     maximize change in the variational free energy, hence minimize the upper bound
@@ -58,7 +58,7 @@ def prune_params(post: MVNIG, prior: MVNIG, *, key: PRNGKey, max_iter: int = 10,
         prior: Prior MultivariateNormalInverseGamma distribution
         key: Random number generator key
         max_iter: Maximal number of iterations for the Gibbs sampler
-        ard_prior: Optional ARD Gamma prior over column precisions. When provided,
+        ard_post: Optional ARD Gamma posterior over column precisions. When provided,
             uses ARD-aware Gibbs sampler that accounts for column precision in
             the free energy change computation.
 
@@ -77,8 +77,8 @@ def prune_params(post: MVNIG, prior: MVNIG, *, key: PRNGKey, max_iter: int = 10,
         pi = Beta(alpha, beta).sample(_key)
 
         key, _key = jr.split(key)
-        if ard_prior is not None:
-            delta_f, mask = gibbs_sampler_with_ard(_key, post, ard_prior, pi, mask, delta_f)
+        if ard_post is not None:
+            delta_f, mask = gibbs_sampler_with_ard(_key, post, ard_post, pi, mask, delta_f)
         else:
             delta_f, mask = gibbs_sampler_mvnig(_key, post, prior, pi, mask, delta_f)
 

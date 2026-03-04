@@ -124,6 +124,7 @@ def gibbs_sampler_with_ard(
     lm_mean = q_w_psi.mvn.mean  # loading matrix mean
     lm_prec = q_w_psi.mvn.precision  # loading matrix precision
     eta = jnp.log(pi) - jnp.log(1 - pi)
+    
     # Only iterate over ARD columns (not bias/input columns)
     n_ard = len(q_tau.alpha)
 

@@ -2,16 +2,21 @@
 
 Factor Analysis (FA) corresponds to DFA with trivial dynamics: F=0, b=0, Q=I.
 PCA additionally constrains the emission noise to be isotropic: R = sigma^2 I.
+
+Data is reshaped from (N, D) to (N, 1, D) — N independent batches of T=1 —
+so the Kalman smoother runs trivially (one filter step, no scan per batch)
+and vmap over batches handles parallelism.
 """
 
 from typing import Optional, Tuple, Union
 
 import jax.numpy as jnp
 import jax.random as jr
+from dynamax.utils.distributions import NormalInverseWishart as NIW
 
 from sppcax.distributions.mvn_gamma import MultivariateNormalInverseGamma
 from sppcax.types import Array, Matrix, PRNGKey
-from .dfa import BayesianDynamicFactorAnalysis
+from .dynamic_factor_analysis import BayesianDynamicFactorAnalysis
 
 
 def _make_mvnig_prior(n_features, n_components, has_bias=True, isotropic_noise=False, key=None):
@@ -83,6 +88,18 @@ class BayesianFactorAnalysis(BayesianDynamicFactorAnalysis):
             kw_priors["emission_prior"] = _make_mvnig_prior(
                 n_features, n_components, has_bias=has_emissions_bias,
                 isotropic_noise=isotropic_noise, key=key,
+            )
+
+        # Initial prior with mode (m=0, S=I) for z ~ N(0, I).
+        # NIW mode: m = loc, S = scale / (df + dim + 2).
+        # So scale = (df + dim + 2) * I gives S = I.
+        if "initial_prior" not in kw_priors:
+            df = n_components + 2.0
+            kw_priors["initial_prior"] = NIW(
+                loc=jnp.zeros(n_components),
+                mean_concentration=1.0,
+                df=df,
+                scale=(df + n_components + 2) * jnp.eye(n_components),
             )
 
         super().__init__(

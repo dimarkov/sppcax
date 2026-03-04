@@ -6,7 +6,9 @@ and feature parity tests.
 
 import time
 import warnings
+from functools import partial
 
+import jax
 import pytest
 import jax.numpy as jnp
 import jax.random as jr
@@ -20,7 +22,7 @@ with warnings.catch_warnings():
     from sppcax.models.factor_analysis_params import PFA, PPCA
     from sppcax.models.factor_analysis_algorithms import fit, transform, e_step, m_step, compute_elbo
 
-from sppcax.models.dfa import BayesianDynamicFactorAnalysis
+from sppcax.models.dynamic_factor_analysis import BayesianDynamicFactorAnalysis
 from sppcax.models.factor_analysis import BayesianFactorAnalysis, BayesianPCA
 
 
@@ -338,7 +340,7 @@ class TestEStepPerformanceBenchmark:
         from dynamax.parameters import ParameterProperties
         from dynamax.utils.bijectors import RealToPSDBijector
         from dynamax.linear_gaussian_ssm.inference import ParamsLGSSMDynamics
-        from sppcax.models.dfa import ParamsLGSSM
+        from sppcax.models.dynamic_factor_analysis import ParamsLGSSM
 
         fixed_dynamics_props = ParamsLGSSMDynamics(
             weights=ParameterProperties(trainable=False),
@@ -490,8 +492,8 @@ class TestNewFASubclasses:
 class TestEquivalence:
     """Test that new unified model produces results equivalent to legacy code."""
 
-    def test_static_e_step_sufficient_stats(self):
-        """Verify QR E-step produces correctly formatted DFA sufficient statistics."""
+    def test_e_step_sufficient_stats(self):
+        """Verify unified E-step with T=1 batches produces correctly formatted DFA sufficient statistics."""
         key = jr.PRNGKey(42)
         n_samples, n_features, n_components = 50, 10, 3
         X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
@@ -499,17 +501,19 @@ class TestEquivalence:
         model = BayesianFactorAnalysis(n_components=n_components, n_features=n_features, key=key)
         params, props = model.initialize(key)
 
-        stats, ll = model._static_e_step(params, X)
-        init_stats, dynamics_stats, emission_stats = stats
+        # Run e_step with T=1 batches
+        batch_emissions = X[:, None, :]  # (N, 1, D)
+        batch_inputs = jnp.zeros((n_samples, 1, 0))
+        batch_stats, lls = jax.vmap(partial(model.e_step, params))(batch_emissions, batch_inputs)
+        init_stats, dynamics_stats, emission_stats = batch_stats
 
-        # init_stats should be trivial: z_0 ~ N(0, I)
-        Ex0, Ex0x0T, n = init_stats
-        assert jnp.allclose(Ex0, jnp.zeros(n_components))
-        assert jnp.allclose(Ex0x0T, jnp.eye(n_components))
-        assert n == 1
+        # Sum batch stats for aggregate checks
+        sum_zzT = emission_stats[0].sum(0)
+        sum_zyT = emission_stats[1].sum(0)
+        sum_yyT = emission_stats[2].sum(0)
+        N = emission_stats[3].sum(0)
 
         # emission_stats: verify shapes and PSD
-        sum_zzT, sum_zyT, sum_yyT, N = emission_stats
         assert N == n_samples
         assert sum_zzT.shape == (n_components + 1, n_components + 1)  # +1 for bias
         assert sum_zyT.shape == (n_components + 1, n_features)
@@ -519,13 +523,14 @@ class TestEquivalence:
         assert jnp.all(eigvals >= -1e-6)
 
         # ll should be finite
-        assert jnp.isfinite(ll)
+        assert jnp.all(jnp.isfinite(lls))
 
-    def test_kalman_with_f0_qi_matches_qr(self):
-        """Verify Kalman smoother with F=0, Q=I gives same sufficient stats as QR E-step.
+    def test_fa_batched_matches_dfa_sequential(self):
+        """Verify FA E-step (T=1 batches) matches DFA E-step (F=0, Q=I) on data-only stats.
 
-        Both use the DFA class with is_static toggled: one path dispatches to the QR
-        E-step, the other to the Kalman smoother.
+        FA uses T=1 batches (each observation is independent), while DFA processes
+        all observations as a single time series. With F=0, Q=I, both should give
+        equivalent emission sufficient statistics.
         """
         key = jr.PRNGKey(42)
         n_timesteps, n_features, n_components = 30, 10, 3
@@ -543,32 +548,30 @@ class TestEquivalence:
             dynamics_bias=jnp.zeros(n_components),
         )
 
-        # Run Kalman E-step
+        # Run DFA Kalman E-step on full sequence
         stats_kalman, ll_kalman = model_kalman.e_step(params_k, X)
-
-        # Verify Kalman stats are valid and finite
         em_kalman = stats_kalman[2]  # (sum_zzT, sum_zyT, sum_yyT, N)
         assert em_kalman[3] == n_timesteps
         assert jnp.isfinite(ll_kalman)
-        assert jnp.all(jnp.isfinite(em_kalman[0]))
 
-        # Compare with QR E-step using same params
-        # Create FA model with matching weights for QR comparison
-        from sppcax.models.factor_analysis import _make_mvnig_prior
+        # Run FA E-step with T=1 batches using same emission params
         model_static = BayesianFactorAnalysis(
             n_components=n_components, n_features=n_features,
             has_ard=False, key=key,
         )
-        # Initialize and copy Kalman's emission params
         params_s, _ = model_static.initialize(key)
         params_s = params_s._replace(emissions=params_k.emissions)
 
-        stats_static, ll_static = model_static._static_e_step(params_s, X)
-        em_static = stats_static[2]
+        batch_emissions = X[:, None, :]  # (N, 1, D)
+        batch_inputs = jnp.zeros((n_timesteps, 1, 0))
+        batch_stats, lls = jax.vmap(partial(model_static.e_step, params_s))(batch_emissions, batch_inputs)
+        em_static = batch_stats[2]
+        sum_yyT_static = em_static[2].sum(0)
+        N_static = em_static[3].sum(0)
 
         # sum_yyT must be identical (data-only statistic)
-        assert jnp.allclose(em_static[2], em_kalman[2], atol=1e-5), "sum_yyT should match"
-        assert em_static[3] == em_kalman[3], "N should match"
+        assert jnp.allclose(sum_yyT_static, em_kalman[2], atol=1e-5), "sum_yyT should match"
+        assert N_static == em_kalman[3], "N should match"
 
     def test_fa_via_dfa_trains_well(self):
         """Test FA via DFA trains well on synthetic data with known structure."""
