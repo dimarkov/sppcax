@@ -6,10 +6,10 @@ from jax import numpy as jnp
 from jax import random as jr
 from multipledispatch import dispatch
 
-from ..distributions import Beta, MultivariateNormal, Gamma, MultivariateNormalInverseGamma as MVNIG
+from ..distributions import Beta, MultivariateNormal as MVN, Gamma, MultivariateNormalInverseGamma as MVNIG
 from ..models.factor_analysis_params import BayesianFactorAnalysisParams, PFA
 from ..types import PRNGKey
-from .delta_f import gibbs_sampler_mvn, gibbs_sampler_pfa, gibbs_sampler_mvnig, gibbs_sampler_with_ard
+from .delta_f import gibbs_sampler_mvn, gibbs_sampler_pfa, gibbs_sampler_mvnig, gibbs_sampler_with_ard, gibbs_sampler_mvn
 
 from dynamax.utils.distributions import NormalInverseWishart as NIW
 
@@ -106,6 +106,45 @@ def prune_params(post: MVNIG, prior: MVNIG, *, key: PRNGKey, max_iter: int = 10,
     return opt_post
 
 
+@dispatch(MVN, MVN)
+def prune_params(post: MVN, prior: MVN, *, key: PRNGKey, max_iter: int = 10) -> MVN:  # noqa: F811
+    """Applies Bayesian model reduction to distribution, where the individual elements of a 
+    Multivariate Normal get pruned to maximize change in the variational free energy, 
+    hence minimize the upper bound on marginal log-likelihood.
+
+    Args:
+        post: Posterior MultivariateNormal distribution
+        prior: Prior MultivariateNormal distribution
+        key: Random number generator key
+        max_iter: Maximal number of iterations for the Gibbs sampler
+
+    Returns:
+        Optimized posterior MultivariateNormal distribution
+    """
+
+    # prune parameters
+    def step_fn(carry, t):
+        delta_f, mask, key = carry
+
+        alpha = 1.0 + mask.sum(0)
+        beta = 1.0 + (1 - mask).sum(0)
+
+        key, _key = jr.split(key)
+        pi = Beta(alpha, beta).sample(_key)
+
+        key, _key = jr.split(key)
+        delta_f, mask = gibbs_sampler_mvn(_key, post, pi, mask, delta_f, prior=prior)
+
+        return (delta_f, mask, key), delta_f
+
+    init = (jnp.zeros(post.batch_shape), prior.mask, key)
+    (last_df, mask, key), delta_fs = lax.scan(step_fn, init, jnp.arange(max_iter), unroll=2)
+
+    opt_post = eqx.tree_at(lambda d: (d.mask,), post, (mask,))
+
+    return opt_post
+
+
 @dispatch(PFA)
 def reduce_model(model: PFA, *, key: PRNGKey, max_iter: int = 4) -> PFA:
     """Reduce model by pruning parameters with insufficient evidence.
@@ -172,10 +211,10 @@ def reduce_model(model: PFA, *, key: PRNGKey, max_iter: int = 4) -> PFA:
     return model
 
 
-@dispatch(MultivariateNormal)
+@dispatch(MVN)
 def reduce_model(  # noqa: F811
-    model: MultivariateNormal, *, key: PRNGKey, pi: float = 0.5, max_iter: int = 1
-) -> MultivariateNormal:
+    model: MVN, *, key: PRNGKey, pi: float = 0.5, max_iter: int = 1
+) -> MVN:
     """Reduce model by pruning parameters with insufficient evidence.
 
     Args:

@@ -2,7 +2,7 @@ import jax.numpy as jnp
 from jax.scipy.special import digamma, multigammaln
 from multipledispatch import dispatch
 
-from sppcax.distributions import MultivariateNormalInverseGamma as MVNIG, InverseGamma
+from sppcax.distributions import MultivariateNormalInverseGamma as MVNIG, InverseGamma, MultivariateNormal as MVN
 from dynamax.utils.distributions import NormalInverseWishart as NIW, MatrixNormalInverseWishart as MNIW, InverseWishart
 from tensorflow_probability.substrates import jax as tfp
 
@@ -15,7 +15,7 @@ def multidigamma(a, p):
 
 
 @dispatch(InverseWishart, InverseWishart)
-def kl_divergence(q: InverseWishart, p: InverseWishart):
+def kl_divergence(q: InverseWishart, p: InverseWishart) -> float:
     df_q = q.df
     df_p = p.df
 
@@ -34,7 +34,7 @@ def kl_divergence(q: InverseWishart, p: InverseWishart):
 
 
 @dispatch(NIW, NIW)
-def kl_divergence(q: NIW, p: NIW):
+def kl_divergence(q: NIW, p: NIW) -> float:
     kl_div1 = kl_divergence(q.model[0], p.model[0])
     mc_q = q.mean_concentration
     mc_p = p.mean_concentration
@@ -51,7 +51,7 @@ def kl_divergence(q: NIW, p: NIW):
 
 
 @dispatch(MNIW, MNIW)
-def kl_divergence(q: MNIW, p: MNIW):
+def kl_divergence(q: MNIW, p: MNIW) -> float:
     kl_div1 = kl_divergence(q.model[0], p.model[0])
 
     diff = p.loc - q.loc
@@ -69,12 +69,12 @@ def kl_divergence(q: MNIW, p: MNIW):
 
 
 @dispatch(InverseGamma, InverseGamma)
-def kl_divergence(q: InverseGamma, p: InverseGamma):
+def kl_divergence(q: InverseGamma, p: InverseGamma) -> float:
     return q.kl_divergence(p)
 
 
 @dispatch(MVNIG, MVNIG)
-def kl_divergence(q: MVNIG, p: MVNIG):
+def kl_divergence(q: MVNIG, p: MVNIG) -> float:
     kl_div1 = q.inv_gamma.kl_divergence_from_prior.sum()
 
     diff = p.mean - q.mean
@@ -95,3 +95,26 @@ def kl_divergence(q: MVNIG, p: MVNIG):
     kl_div2 -= 0.5 * (jnp.linalg.slogdet(P_p)[1] - jnp.linalg.slogdet(q.precision)[1]).sum()
 
     return kl_div1 + kl_div2
+
+
+@dispatch(MVN, MVN)
+def kl_divergence(q: MVN, p: MVN) -> float:
+
+    diff = p.mean - q.mean
+    n, k = diff.shape
+
+    # shape (n, k, k)
+    P_p = p.precision
+    C_q = q.covariance
+    P = P_p @ C_q
+
+    kl_div = 0.5 * (
+        jnp.trace(P, axis1=-1, axis2=-2).sum()
+        + jnp.sum(diff * (P_p @ diff[..., None]).squeeze(-1), axis=(-1, -2))
+        - n * k
+    )
+
+    # todo: find a better way to compute logdet if covariance has zero diagonal values due to masking
+    kl_div -= 0.5 * (jnp.linalg.slogdet(P_p)[1] + jnp.linalg.slogdet(q.precision)[1]).sum()
+
+    return kl_div

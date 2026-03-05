@@ -16,33 +16,8 @@ from dynamax.utils.distributions import NormalInverseWishart as NIW
 
 from sppcax.distributions.mvn_gamma import MultivariateNormalInverseGamma
 from sppcax.types import Array, Matrix, PRNGKey
-from .dynamic_factor_analysis import BayesianDynamicFactorAnalysis
-
-
-def _make_mvnig_prior(n_features, n_components, has_bias=True, isotropic_noise=False, key=None):
-    """Create a default MVNIG emission prior for FA/PCA.
-
-    Args:
-        n_features: Number of observed features (emission_dim).
-        n_components: Number of latent components (state_dim).
-        has_bias: Whether the model has an emission bias term.
-        isotropic_noise: If True, use shared noise precision (PCA).
-        key: Optional random key for initialization.
-    """
-    dim = n_components + has_bias  # columns: [H, d] or just [H]
-    if key is not None:
-        loc = jr.normal(key, (n_features, dim)) * 0.01
-    else:
-        loc = jnp.zeros((n_features, dim))
-
-    # Default mask: lower-triangular-like for identifiability
-    mask = jnp.clip(jnp.arange(n_features), max=n_components)[..., None] >= jnp.arange(n_components)
-    if has_bias:
-        mask = jnp.concatenate([mask, jnp.ones((n_features, 1), dtype=bool)], axis=-1)
-
-    return MultivariateNormalInverseGamma(
-        loc=loc, mask=mask, alpha0=2.0, beta0=1.0, isotropic_noise=isotropic_noise
-    )
+from sppcax.models.dynamic_factor_analysis import BayesianDynamicFactorAnalysis
+from sppcax.models.utils import _make_mvnig_prior
 
 
 class BayesianFactorAnalysis(BayesianDynamicFactorAnalysis):
@@ -86,7 +61,7 @@ class BayesianFactorAnalysis(BayesianDynamicFactorAnalysis):
         # Create MVNIG emission prior if not provided
         if "emission_prior" not in kw_priors:
             kw_priors["emission_prior"] = _make_mvnig_prior(
-                n_features, n_components, has_bias=has_emissions_bias,
+                n_features, n_components, input_dim, has_bias=has_emissions_bias,
                 isotropic_noise=isotropic_noise, key=key,
             )
 

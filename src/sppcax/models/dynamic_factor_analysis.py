@@ -44,6 +44,7 @@ from sppcax.metrics import kl_divergence
 from sppcax.metrics.kl_divergence import multidigamma, digamma
 
 from sppcax.bmr import prune_params
+from sppcax.models.utils import _make_mvnig_prior, _make_mvn_prior
 
 
 def _mniw_posterior_update(dist, stats, props):
@@ -68,15 +69,63 @@ def _niw_posterior_update(dist, stats, props):
 
     return niw_posterior_update(dist, stats)
 
+def _mvn_posterior_update(dist, stats, props):
+    """Update the multivaraite normal inverse distribution using sufficient statistics
+    Returns:
+        posterior MVN distribution
+    """
+
+    if not props.weights.trainable:
+        return dist
+
+    nat1 = dist.nat1
+    prior_precision = -2.0 * dist.nat2
+
+    # unpack the sufficient statistics
+    SxxT, SxyT, *_ = stats
+    
+    # compute parameters of the posterior distribution
+    nat2_post = - 0.5 * (prior_precision + SxxT)
+    nat1_post = dist.apply_mask_vector(nat1 + SxyT.mT)
+
+    mvn_post = eqx.tree_at(lambda d: (d.nat1, d.nat2), dist, (nat1_post, nat2_post))
+
+    return mvn_post
+
 
 def _posterior_update(dist, stats, props):
     if isinstance(dist, MultivariateNormalInverseGamma):
         return _mvnig_posterior_update(dist, stats, props)
     elif isinstance(dist, MatrixNormalInverseWishart):
         return _mniw_posterior_update(dist, stats, props)
+    elif isinstance(dist, MultivariateNormal):
+        return _mvn_posterior_update(dist, stats, props)
     else:
         raise NotImplementedError
 
+def _get_mode(dist):
+    if isinstance(dist, MultivariateNormal):
+        mean = dist.mean
+        covariance = jnp.eye(mean.shape[-2])
+        return covariance, mean
+
+    elif hasattr(dist, 'mode'):
+        return dist.mode()
+    
+    else:
+        raise NotImplementedError
+
+def _get_sample(dist, key):
+    if isinstance(dist, MultivariateNormal):
+        mean = dist.sample(key)
+        covariance = jnp.eye(mean.shape[-2])
+        return covariance, mean
+
+    elif hasattr(dist, 'sample'):
+        return dist.sample(seed=key)
+    
+    else:
+        raise NotImplementedError
 
 def _get_moments(dist):
     if isinstance(dist, Union[NormalInverseWishart, MatrixNormalInverseWishart]):
@@ -89,7 +138,11 @@ def _get_moments(dist):
         # inverse of expected precision
         covariance = jnp.diag(dist.expected_psi)
         return covariance, mean
-
+    
+    elif isinstance(dist, MultivariateNormal):
+        mean = dist.mean
+        covariance = jnp.eye(mean.shape[-2])
+        return covariance, mean
     else:
         raise NotImplementedError
 
@@ -105,6 +158,9 @@ def _get_ll_correction(dist):
         alpha = dist.alpha
         return jnp.sum(digamma(alpha) - jnp.log(alpha)) / 2
 
+    elif isinstance(dist, MultivariateNormal):
+        return 0.0
+
     else:
         raise NotImplementedError
 
@@ -118,7 +174,10 @@ def _get_correction(dist):
     elif isinstance(dist, MultivariateNormalInverseGamma):
         # inverse of expected precision
         return dist.col_covariance.sum(-3)
-
+    
+    elif isinstance(dist, MultivariateNormal):
+        return dist.covariance.sum(-3)
+    
     else:
         raise NotImplementedError
 
@@ -181,7 +240,24 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         has_sparsity_prior=False,
         isotropic_noise=False,
         **kw_priors,
-    ):
+    ):  
+        emission_prior = _make_mvnig_prior(
+            emission_dim,
+            state_dim,
+            input_dim,
+            has_bias=has_emissions_bias,
+            isotropic_noise=isotropic_noise,
+        )
+
+        dynamics_prior = _make_mvn_prior(
+            state_dim,
+            input_dim,
+            has_bias = has_dynamics_bias
+        )
+
+        kw_priors['emission_prior'] = kw_priors.pop('emission_prior', emission_prior)
+        kw_priors['dynamics_prior'] = kw_priors.pop('dynamics_prior', dynamics_prior)
+
         super().__init__(
             state_dim,
             emission_dim,
@@ -258,16 +334,13 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         _initial_covariance = jnp.eye(self.state_dim)
 
         # Static mode: F=0, b=0, Q=I (FA/PCA)
+        _dynamics_bias = jnp.zeros((self.state_dim,))
+        _dynamics_covariance = jnp.eye(self.state_dim)
+        _dynamics_input_weights = jnp.zeros((self.state_dim, self.input_dim))
         if self.is_static:
             _dynamics_weights = jnp.zeros((self.state_dim, self.state_dim))
-            _dynamics_bias = jnp.zeros((self.state_dim,))
-            _dynamics_covariance = jnp.eye(self.state_dim)
         else:
             _dynamics_weights = 0.99 * jnp.eye(self.state_dim)
-            _dynamics_bias = jnp.zeros((self.state_dim,))
-            _dynamics_covariance = 0.1 * jnp.eye(self.state_dim)
-
-        _dynamics_input_weights = jnp.zeros((self.state_dim, self.input_dim))
 
         # Initialize emission weights from MVNIG prior if available
         if isinstance(self.emission_prior, MultivariateNormalInverseGamma):
@@ -330,8 +403,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
             params = eqx.tree_at(lambda p: (p.dynamics, p.emissions), params, (dynamics, emissions))
 
-        # The keys of param_props must match those of params!
-        # In static mode, dynamics and initial distribution are fixed (non-trainable)
+        # In static mode (FA), dynamics and initial distribution are fixed by default (non-trainable)
         dynamics_trainable = not self.is_static
         initial_trainable = not self.is_static
         props = ParamsLGSSM(
@@ -343,7 +415,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
                 weights=ParameterProperties(trainable=dynamics_trainable),
                 bias=ParameterProperties(trainable=dynamics_trainable),
                 input_weights=ParameterProperties(trainable=dynamics_trainable),
-                cov=ParameterProperties(trainable=dynamics_trainable, constrainer=RealToPSDBijector()),
+                cov=ParameterProperties(trainable=False, constrainer=RealToPSDBijector()),
             ),
             emissions=ParamsLGSSMEmissions(
                 weights=ParameterProperties(),
@@ -360,7 +432,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         props: ParamsLGSSM,
         batch_stats: SuffStatsLGSSM,
         m_step_state: Any,
-        key: PRNGKey = None,
+        key: PRNGKey = None
     ):
         """Perform the M-step of the EM algorithm.
 
@@ -387,7 +459,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             initial_posterior = prune_params(initial_posterior, self.initial_prior, key=_key)
 
         if props.initial.mean.trainable and props.initial.cov.trainable:
-            S, m = initial_posterior.mode()
+            S, m = _get_mode(initial_posterior)
             kl_div = kl_divergence(initial_posterior, self.initial_prior)
         else:
             m, S = params.initial.mean, params.initial.cov
@@ -399,7 +471,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             dynamics_posterior = prune_params(dynamics_posterior, self.dynamics_prior, key=_key)
 
         if props.dynamics.weights.trainable and props.dynamics.cov.trainable:
-            Q, FB = dynamics_posterior.mode()
+            Q, FB = _get_mode(dynamics_posterior)
             kl_div += kl_divergence(dynamics_posterior, self.dynamics_prior)
         else:
             Q = params.dynamics.cov
@@ -422,19 +494,20 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         emission_posterior = _posterior_update(emission_prior, emission_stats, props.emissions)
 
-        # ARD update: compute tau prior updates for next iteration
+        if self.use_bmr.emissions and key is not None:
+            key, _key = jr.split(key)
+            emission_posterior = prune_params(emission_posterior, emission_prior, key=_key)
+
+        kl_div += kl_divergence(emission_posterior, emission_prior)
+
+        # ARD update: compute tau prior updates before BMR pruning
         if self.has_ard and isinstance(emission_posterior, MultivariateNormalInverseGamma):
             ard_updates = self._compute_ard_updates(emission_posterior, self.state_dim)
             ard_post = eqx.tree_at(lambda d: (d.dnat1, d.dnat2), self.ard_prior, ard_updates)
             kl_div += ard_post.kl_divergence_from_prior.sum()
             m_step_state = ard_post
 
-        if self.use_bmr.emissions and key is not None:
-            key, _key = jr.split(key)
-            ard = ard_post if self.has_ard else None
-            emission_posterior = prune_params(emission_posterior, emission_prior, key=_key, ard_post=ard)
-
-        R, HD = emission_posterior.mode()
+        R, HD = _get_mode(emission_posterior)
         kl_div += kl_divergence(emission_posterior, emission_prior)            
         H = HD[:, : self.state_dim]
         D, d = (
@@ -468,7 +541,8 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         return dnat1_tau, dnat2_tau
 
-    def _apply_ard_to_emission_prior(self, emission_prior, m_step_state):
+    @staticmethod
+    def _apply_ard_to_emission_prior(emission_prior, m_step_state):
         """Modify emission prior precision by incorporating ARD tau from previous iteration.
 
         Reconstructs the ARD posterior from m_step_state, computes E[tau], and adds it
@@ -1082,7 +1156,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
             return init_stats, dynamics_stats, emission_stats
 
-        def lgssm_params_sample(rng, stats):
+        def lgssm_params_sample(rng, stats, m_step_state):
             """Sample parameters of the model given sufficient statistics from observed states and emissions."""
             init_stats, dynamics_stats, emission_stats = stats
 
@@ -1094,7 +1168,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             kl_div = kl_divergence(initial_posterior, self.initial_prior)
 
             rng, key = jr.split(rng)
-            S, m = initial_posterior.sample(seed=key)
+            S, m = _get_sample(initial_posterior, key)
 
             # Sample the dynamics params
             dynamics_posterior = _posterior_update(self.dynamics_prior, dynamics_stats, props.dynamics)
@@ -1105,7 +1179,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             kl_div += kl_divergence(dynamics_posterior, self.dynamics_prior)
 
             rng, key = jr.split(rng)
-            Q, FB = dynamics_posterior.sample(seed=key)
+            Q, FB = _get_sample(dynamics_posterior, key)
             F = FB[:, : self.state_dim]
             B, b = (
                 (FB[:, self.state_dim : -1], FB[:, -1])
@@ -1113,16 +1187,30 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
                 else (FB[:, self.state_dim :], jnp.zeros(self.state_dim))
             )
 
+            # Apply ARD tau to emission prior (uses tau from previous iteration)
+            if self.has_ard and isinstance(self.emission_prior, MultivariateNormalInverseGamma):
+                emission_prior = self._apply_ard_to_emission_prior(self.emission_prior, m_step_state)
+            else:
+                emission_prior = self.emission_prior
+
+            emission_posterior = _posterior_update(emission_prior, emission_stats, props.emissions)
+
+            if self.use_bmr.emissions and key is not None:
+                key, _key = jr.split(key)
+                emission_posterior = prune_params(emission_posterior, emission_prior, key=_key)
+
+            kl_div += kl_divergence(emission_posterior, emission_prior)
+
+            # ARD update: compute tau prior updates before BMR pruning
+            if self.has_ard and isinstance(emission_posterior, MultivariateNormalInverseGamma):
+                ard_updates = self._compute_ard_updates(emission_posterior, self.state_dim)
+                ard_post = eqx.tree_at(lambda d: (d.dnat1, d.dnat2), self.ard_prior, ard_updates)
+                kl_div += ard_post.kl_divergence_from_prior.sum()
+                m_step_state = ard_post
+
             # Sample the emission params
-            emission_posterior = _posterior_update(self.emission_prior, emission_stats, props.emissions)
-            if self.use_bmr.emissions:
-                rng, key = jr.split(rng)
-                emission_posterior = prune_params(emission_posterior, self.emission_prior, key=key)
-
-            kl_div += kl_divergence(emission_posterior, self.emission_prior)
-
             rng, key = jr.split(rng)
-            R, HD = emission_posterior.sample(seed=key)
+            R, HD = _get_sample(emission_posterior, key)
 
             H = HD[:, : self.state_dim]
             D, d = (
@@ -1137,9 +1225,9 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
                 emissions=ParamsLGSSMEmissions(weights=H, bias=d, input_weights=D, cov=R),
             )
 
-            return params, kl_div
+            return params, kl_div, m_step_state
 
-        def one_sample(_params, kl_div, rng):
+        def one_sample(_params, kl_div, m_step_state, rng):
             """Sample a single set of states and compute their sufficient stats."""
             rngs = jr.split(rng, 2)
             # Sample latent states
@@ -1158,16 +1246,17 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             # Aggregate statistics from all observations.
             _stats = tree.map(lambda x: jnp.sum(x, axis=0), _batch_stats)
             # Sample parameters
-            return lgssm_params_sample(rngs[1], _stats), elbo
+            return lgssm_params_sample(rngs[1], _stats, m_step_state), elbo
 
         def step_fn(carry, *args):
-            params, kl_div, key = carry
+            params, kl_div, m_step_state, key = carry
             key, _key = jr.split(key)
-            (current_params, kl_div), elbo = one_sample(params, kl_div, _key)
-            return (current_params, kl_div, key), (params, elbo)
+            (current_params, kl_div, m_step_state), elbo = one_sample(params, kl_div, m_step_state, _key)
+            return (current_params, kl_div, m_step_state, key), (params, elbo)
 
         kl_div = 0.0
-        carry = (initial_params, kl_div, key)
+        m_step_state = self.initialize_m_step_state(initial_params, props)
+        carry = (initial_params, kl_div, m_step_state, key)
         if verbose:
             sample_of_params = []
             elbos = []
@@ -1180,8 +1269,10 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             sample_of_params = pytree_stack(sample_of_params[burn_in:])
             elbos = jnp.stack(elbos).squeeze()[burn_in:]
         else:
-            _, (sample_of_params, elbos) = lax.scan(step_fn, carry, jnp.arange(sample_size))
+            carry, (sample_of_params, elbos) = lax.scan(step_fn, carry, jnp.arange(sample_size))
             sample_of_params = jtu.tree_map(lambda x: x[burn_in:], sample_of_params)
             elbos = elbos.squeeze()[burn_in:]
+
+        self.ard_prior = carry[-1]
 
         return sample_of_params, elbos
