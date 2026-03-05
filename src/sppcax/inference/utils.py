@@ -49,11 +49,11 @@ def _get_params(params, num_timesteps, t):
     B = _get_one_param(params.dynamics.input_weights, 2, t)
     b = _get_one_param(params.dynamics.bias, 1, t)
     Q = _get_one_param(params.dynamics.cov, 2, t)
-    Cx = _get_one_param(params.dynamics.correction, 2, t)
+    Cx = _get_one_param(params.dynamics.correction.sum(-3), 2, t)
     H = _get_one_param(params.emissions.weights, 2, t)
     D = _get_one_param(params.emissions.input_weights, 2, t)
     d = _get_one_param(params.emissions.bias, 1, t)
-    Cy = _get_one_param(params.emissions.correction, 2, t)
+    Cy = _get_one_param(params.emissions.correction.sum(-3), 2, t)
 
     if len(params.emissions.cov.shape) == 1:
         R = _get_one_param(params.emissions.cov, 1, t)

@@ -169,14 +169,14 @@ def _get_correction(dist):
     if isinstance(dist, MatrixNormalInverseWishart):
         dim, _ = dist._matrix_normal_shape
         col_precision = dist.col_precision
-        return dim * cho_inv(col_precision)
+        return jnp.broadcast_to(cho_inv(col_precision), (dim,) + col_precision.shape)
 
     elif isinstance(dist, MultivariateNormalInverseGamma):
         # inverse of expected precision
-        return dist.col_covariance.sum(-3)
+        return dist.col_covariance
     
     elif isinstance(dist, MultivariateNormal):
-        return dist.covariance.sum(-3)
+        return dist.covariance
     
     else:
         raise NotImplementedError
@@ -380,9 +380,9 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         if variational_bayes:
             dim = self.state_dim + self.input_dim + self.has_dynamics_bias
-            C_dyn = jnp.zeros((dim, dim))
+            C_dyn = jnp.zeros((self.state_dim, dim, dim))
             dim = self.state_dim + self.input_dim + self.has_emissions_bias
-            C_em = jnp.zeros((dim, dim))
+            C_em = jnp.zeros((self.emission_dim, dim, dim))
 
             dynamics = ParamsLGSSMVB(
                 weights=params.dynamics.weights,
