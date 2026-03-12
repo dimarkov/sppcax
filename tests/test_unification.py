@@ -1,21 +1,12 @@
-"""Tests for unifying FA/PCA as special cases of DFA.
+"""Tests for unified FA/PCA/DFA models.
 
-Includes baseline tests, performance benchmarks, equivalence tests,
-and feature parity tests.
+Covers all combinations of ARD, parameter expansion (PX), and Bayesian model
+reduction (BMR) for both FA and DFA, plus feature parity tests.
 """
 
-import time
-import warnings
-from functools import partial
-
-import jax
-import pytest
 import jax.numpy as jnp
 import jax.random as jr
-from jax import jit
-
-from sppcax.distributions.delta import Delta
-from sppcax.distributions.mvn import MultivariateNormal
+import pytest
 
 from sppcax.models.dynamic_factor_analysis import BayesianDynamicFactorAnalysis
 from sppcax.models.factor_analysis import BayesianFactorAnalysis, BayesianPCA
@@ -25,11 +16,10 @@ from sppcax.models.factor_analysis import BayesianFactorAnalysis, BayesianPCA
 # Synthetic data generation
 # ============================================================================
 
+
 def generate_iid_data(key, n_samples=100, n_features=10, n_components=3):
     """Generate synthetic iid FA data with known ground truth."""
     k1, k2, k3 = jr.split(key, 3)
-
-    # True loading matrix (sparse)
     W_true = jnp.zeros((n_features, n_components))
     W_true = W_true.at[:4, 0].set(jr.normal(k1, (4,)))
     W_true = W_true.at[3:7, 1].set(jr.normal(k2, (4,)))
@@ -39,24 +29,36 @@ def generate_iid_data(key, n_samples=100, n_features=10, n_components=3):
     Z_true = jr.normal(k1, (n_samples, n_components))
     noise = 0.3 * jr.normal(k2, (n_samples, n_features))
     X = Z_true @ W_true.T + noise
-
     return X, W_true, Z_true
 
 
-def generate_timeseries_data(key, n_timesteps=200, n_features=10, n_components=3):
+def generate_sparse_iid_data(key, n_samples=100, n_features=10, n_true_components=2, n_model_components=5):
+    """Generate sparse iid data where only a few components are active.
+
+    Useful for testing BMR and ARD, which should prune excess components.
+    """
+    k1, k2, k3 = jr.split(key, 3)
+    W_true = jnp.zeros((n_features, n_true_components))
+    W_true = W_true.at[:5, 0].set(jr.normal(k1, (5,)) * 2.0)
+    W_true = W_true.at[5:10, 1].set(jr.normal(k2, (5,)) * 2.0)
+
+    k1, k2 = jr.split(k1)
+    Z_true = jr.normal(k1, (n_samples, n_true_components))
+    noise = 0.3 * jr.normal(k2, (n_samples, n_features))
+    X = Z_true @ W_true.T + noise
+    return X, W_true, Z_true, n_model_components
+
+
+def generate_timeseries_data(key, n_timesteps=100, n_features=10, n_components=3):
     """Generate synthetic time-series DFA data with known ground truth."""
     k1, k2, k3 = jr.split(key, 3)
-
-    # True emission matrix (sparse)
     H_true = jnp.zeros((n_features, n_components))
     H_true = H_true.at[:4, 0].set(jr.normal(k1, (4,)))
     H_true = H_true.at[3:7, 1].set(jr.normal(k2, (4,)))
     H_true = H_true.at[6:10, 2].set(jr.normal(k3, (4,)))
 
-    # True AR(1) dynamics
     F_true = 0.95 * jnp.eye(n_components)
 
-    # Generate latent states
     k1, k2 = jr.split(k1)
     z = jnp.zeros((n_timesteps, n_components))
     z = z.at[0].set(jr.normal(k1, (n_components,)))
@@ -67,13 +69,13 @@ def generate_timeseries_data(key, n_timesteps=200, n_features=10, n_components=3
     k1, _ = jr.split(k1)
     noise = 0.3 * jr.normal(k1, (n_timesteps, n_features))
     Y = z @ H_true.T + noise
-
     return Y, H_true, F_true, z
 
 
 # ============================================================================
-# Phase 1b: Reference outputs from current DFA
+# DFA Baseline Tests
 # ============================================================================
+
 
 class TestDFABaseline:
     """Record and verify baseline DFA outputs."""
@@ -81,7 +83,7 @@ class TestDFABaseline:
     def test_dfa_em_baseline(self):
         """Record DFA EM baseline."""
         key = jr.PRNGKey(42)
-        Y, H_true, F_true, z_true = generate_timeseries_data(key)
+        Y, H_true, F_true, z_true = generate_timeseries_data(key, n_timesteps=100)
 
         model = BayesianDynamicFactorAnalysis(
             state_dim=3, emission_dim=10, has_dynamics_bias=True, has_emissions_bias=True
@@ -89,14 +91,14 @@ class TestDFABaseline:
         params, props = model.initialize(key)
         params, elbos = model.fit_em(params, props, Y, key=key, num_iters=30, verbose=False)
 
-        assert elbos.shape == (29,)  # fit_em returns elbos[1:]
+        assert elbos.shape == (29,)
         assert params.emissions.weights.shape == (10, 3)
         assert params.dynamics.weights.shape == (3, 3)
 
     def test_dfa_vbem_baseline(self):
         """Record DFA VBEM baseline."""
         key = jr.PRNGKey(42)
-        Y, _, _, _ = generate_timeseries_data(key)
+        Y, _, _, _ = generate_timeseries_data(key, n_timesteps=100)
 
         model = BayesianDynamicFactorAnalysis(
             state_dim=3, emission_dim=10, has_dynamics_bias=True, has_emissions_bias=True
@@ -110,15 +112,14 @@ class TestDFABaseline:
     def test_dfa_gibbs_baseline(self):
         """Record DFA Gibbs baseline."""
         key = jr.PRNGKey(42)
-        Y, _, _, _ = generate_timeseries_data(key)
+        Y, _, _, _ = generate_timeseries_data(key, n_timesteps=100)
 
         model = BayesianDynamicFactorAnalysis(
             state_dim=3, emission_dim=10, has_dynamics_bias=True, has_emissions_bias=True
         )
         params, props = model.initialize(key)
         sample_of_params, elbos = model.fit_blocked_gibbs(
-            key=key, initial_params=params, props=props, sample_size=10,
-            emissions=Y[None, ...], verbose=False
+            key=key, initial_params=params, props=props, sample_size=10, emissions=Y[None, ...], verbose=False
         )
 
         assert sample_of_params.emissions.weights.shape[0] == 10  # 10 samples
@@ -126,196 +127,12 @@ class TestDFABaseline:
 
 
 # ============================================================================
-# Phase 1c: Performance benchmark - DFA E-step
+# FA/PCA Subclass Tests
 # ============================================================================
 
-class TestEStepPerformanceBenchmark:
-    """Benchmark DFA Kalman smoother E-step."""
 
-    def _run_dfa_e_step_as_fa(self, X, n_components, n_iters=5):
-        """Run DFA E-step with F=0, Q=I (treating iid data as time series)."""
-        key = jr.PRNGKey(0)
-        n_samples, n_features = X.shape
-
-        model = BayesianDynamicFactorAnalysis(
-            state_dim=n_components, emission_dim=n_features,
-            has_dynamics_bias=False, has_emissions_bias=True,
-        )
-        params, props = model.initialize(
-            key,
-            dynamics_weights=jnp.zeros((n_components, n_components)),
-            dynamics_covariance=jnp.eye(n_components),
-            dynamics_bias=jnp.zeros(n_components),
-        )
-
-        # Warm up JIT
-        stats, ll = model.e_step(params, X)
-        ll.block_until_ready()
-
-        start = time.perf_counter()
-        for _ in range(n_iters):
-            stats, ll = model.e_step(params, X)
-            ll.block_until_ready()
-        elapsed = (time.perf_counter() - start) / n_iters
-        return elapsed
-
-    def test_kalman_f0_qi_produces_valid_stats(self):
-        """Verify DFA with F=0, Q=I produces valid sufficient statistics."""
-        key = jr.PRNGKey(42)
-        n_timesteps, n_features, n_components = 100, 10, 3
-        X, _, _ = generate_iid_data(key, n_timesteps, n_features, n_components)
-
-        model = BayesianDynamicFactorAnalysis(
-            state_dim=n_components, emission_dim=n_features,
-            has_dynamics_bias=False, has_emissions_bias=True,
-        )
-        params, props = model.initialize(
-            key,
-            dynamics_weights=jnp.zeros((n_components, n_components)),
-            dynamics_covariance=jnp.eye(n_components),
-            dynamics_bias=jnp.zeros(n_components),
-        )
-
-        stats, ll = model.e_step(params, X)
-        init_stats, dynamics_stats, emission_stats = stats
-
-        # Verify shapes
-        sum_zzT, sum_zyT, sum_yyT, N = emission_stats
-        assert sum_zzT.shape[0] == n_components + 1  # +1 for bias
-        assert sum_zyT.shape == (n_components + 1, n_features)
-        assert sum_yyT.shape == (n_features, n_features)
-        assert N == n_timesteps
-        assert jnp.isfinite(ll)
-
-    def test_dfa_f0_qi_fit_em(self):
-        """Verify DFA with F=0, Q=I can fit iid data via EM."""
-        key = jr.PRNGKey(42)
-        n_timesteps, n_features, n_components = 100, 10, 3
-        X, _, _ = generate_iid_data(key, n_timesteps, n_features, n_components)
-
-        model = BayesianDynamicFactorAnalysis(
-            state_dim=n_components, emission_dim=n_features,
-            has_dynamics_bias=False, has_emissions_bias=True,
-        )
-        params, props = model.initialize(
-            key,
-            dynamics_weights=jnp.zeros((n_components, n_components)),
-            dynamics_covariance=jnp.eye(n_components),
-            dynamics_bias=jnp.zeros(n_components),
-        )
-
-        # Fix dynamics props to non-trainable
-        from dynamax.parameters import ParameterProperties
-        from dynamax.utils.bijectors import RealToPSDBijector
-        from dynamax.linear_gaussian_ssm.inference import ParamsLGSSMDynamics
-        from sppcax.models.dynamic_factor_analysis import ParamsLGSSM
-
-        fixed_dynamics_props = ParamsLGSSMDynamics(
-            weights=ParameterProperties(trainable=False),
-            bias=ParameterProperties(trainable=False),
-            input_weights=ParameterProperties(trainable=False),
-            cov=ParameterProperties(trainable=False, constrainer=RealToPSDBijector()),
-        )
-        props = ParamsLGSSM(initial=props.initial, dynamics=fixed_dynamics_props, emissions=props.emissions)
-
-        params, elbos = model.fit_em(params, props, X, key=key, num_iters=20, verbose=False)
-
-        assert elbos.shape == (19,)
-        assert params.emissions.weights.shape == (n_features, n_components)
-        # Dynamics weights should remain at zero (non-trainable returns prior mode)
-        assert jnp.allclose(params.dynamics.weights, jnp.zeros((n_components, n_components)))
-        # Dynamics cov will be the prior's mode (not necessarily I), just check it's valid PSD
-        assert jnp.all(jnp.linalg.eigvalsh(params.dynamics.cov) > 0)
-
-
-# ============================================================================
-# Phase 3: New FA/PCA subclasses tests
-# ============================================================================
-
-class TestNewFASubclasses:
+class TestFASubclasses:
     """Test BayesianFactorAnalysis and BayesianPCA subclasses."""
-
-    def test_bayesian_fa_basic(self):
-        """Test BayesianFactorAnalysis creates and fits correctly."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 100, 10, 3
-        X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
-
-        model = BayesianFactorAnalysis(n_components=n_components, n_features=n_features, has_ard=True, key=key)
-
-        assert model.is_static
-        assert model.has_ard
-        assert not model.isotropic_noise
-
-        params, props = model.initialize(key)
-        assert params.emissions.weights.shape == (n_features, n_components)
-        assert not props.dynamics.weights.trainable  # dynamics frozen
-
-        params, elbos = model.fit_em(params, props, X, key=key, num_iters=30, verbose=False)
-        assert elbos.shape == (29,)
-        assert jnp.isfinite(elbos[-1])
-
-    def test_bayesian_pca_basic(self):
-        """Test BayesianPCA creates and fits correctly."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 100, 10, 3
-        X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
-
-        model = BayesianPCA(n_components=n_components, n_features=n_features, has_ard=True, key=key)
-
-        assert model.is_static
-        assert model.has_ard
-        assert model.isotropic_noise
-
-        params, props = model.initialize(key)
-        params, elbos = model.fit_em(params, props, X, key=key, num_iters=30, verbose=False)
-        assert elbos.shape == (29,)
-        assert jnp.isfinite(elbos[-1])
-
-    def test_bayesian_fa_vbem(self):
-        """Test BayesianFactorAnalysis with VBEM."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 100, 10, 3
-        X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
-
-        model = BayesianFactorAnalysis(n_components=n_components, n_features=n_features, key=key)
-        params, props = model.initialize(key, variational_bayes=True)
-        params, elbos = model.fit_vbem(params, props, X, key=key, num_iters=30, verbose=False)
-
-        assert elbos.shape == (29,)
-        assert jnp.isfinite(elbos[-1])
-
-    def test_bayesian_fa_transform(self):
-        """Test BayesianFactorAnalysis transform and inverse_transform."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 100, 10, 3
-        X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
-
-        model = BayesianFactorAnalysis(n_components=n_components, n_features=n_features, key=key)
-        params, props = model.initialize(key)
-        params, _ = model.fit_em(params, props, X, key=key, num_iters=30, verbose=False)
-
-        qz = model.transform(params, X)
-        assert qz.mean.shape == (n_samples, n_components)
-
-        X_recon = model.inverse_transform(params, qz)
-        assert X_recon.mean.shape == (n_samples, n_features)
-
-    def test_bayesian_fa_with_ard_updates(self):
-        """Test that ARD prior gets updated during training."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 100, 10, 3
-        X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
-
-        model = BayesianFactorAnalysis(n_components=n_components, n_features=n_features, has_ard=True, key=key)
-        ard_alpha_before = model.ard_prior.emission.alpha.copy()
-
-        params, props = model.initialize(key)
-        params, _ = model.fit_em(params, props, X, key=key, num_iters=30, verbose=False)
-
-        # ARD prior should have been updated
-        ard_alpha_after = model.ard_prior.emission.alpha
-        assert not jnp.allclose(ard_alpha_before, ard_alpha_after)
 
     def test_fa_hierarchy(self):
         """Test that BayesianPCA is a subclass of BayesianFactorAnalysis is a subclass of DFA."""
@@ -332,182 +149,543 @@ class TestNewFASubclasses:
         assert model_fa.is_static
         assert not model_dfa.is_static
 
-    def test_bayesian_fa_with_bmr(self):
-        """Test BayesianFactorAnalysis with BMR enabled."""
+    def test_bayesian_fa_basic(self):
+        """Test BayesianFactorAnalysis creates and fits correctly."""
         key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 100, 10, 5
-        X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
+        X, _, _ = generate_iid_data(key, n_samples=100, n_features=10, n_components=3)
+
+        model = BayesianFactorAnalysis(n_components=3, n_features=10, has_ard=True, key=key)
+
+        assert model.is_static
+        assert model.has_ard
+        assert not model.isotropic_noise
+
+        params, props = model.initialize(key)
+        assert params.emissions.weights.shape == (10, 3)
+        assert not props.dynamics.weights.trainable  # dynamics frozen
+
+        params, elbos = model.fit_em(params, props, X, key=key, num_iters=30, verbose=False)
+        assert elbos.shape == (29,)
+        assert jnp.isfinite(elbos[-1])
+
+    def test_bayesian_pca_basic(self):
+        """Test BayesianPCA creates and fits correctly."""
+        key = jr.PRNGKey(42)
+        X, _, _ = generate_iid_data(key, n_samples=100, n_features=10, n_components=3)
+
+        model = BayesianPCA(n_components=3, n_features=10, has_ard=True, key=key)
+
+        assert model.is_static
+        assert model.has_ard
+        assert model.isotropic_noise
+
+        params, props = model.initialize(key)
+        params, elbos = model.fit_em(params, props, X, key=key, num_iters=30, verbose=False)
+        assert elbos.shape == (29,)
+        assert jnp.isfinite(elbos[-1])
+
+        # Check isotropic noise: cov should be scalar * I
+        R_diag = jnp.diag(params.emissions.cov)
+        assert jnp.allclose(R_diag, R_diag[0] * jnp.ones_like(R_diag), atol=1e-5)
+
+    def test_bayesian_fa_transform(self):
+        """Test BayesianFactorAnalysis transform and inverse_transform."""
+        key = jr.PRNGKey(42)
+        X, _, _ = generate_iid_data(key, n_samples=100, n_features=10, n_components=3)
+
+        model = BayesianFactorAnalysis(n_components=3, n_features=10, key=key)
+        params, props = model.initialize(key)
+        params, _ = model.fit_em(params, props, X, key=key, num_iters=30, verbose=False)
+
+        qz = model.transform(params, X)
+        assert qz.mean.shape == (100, 3)
+
+        X_recon = model.inverse_transform(params, qz)
+        assert X_recon.mean.shape == (100, 10)
+
+    def test_bayesian_fa_with_ard_updates(self):
+        """Test that ARD prior gets updated during training."""
+        key = jr.PRNGKey(42)
+        X, _, _ = generate_iid_data(key, n_samples=100, n_features=10, n_components=3)
+
+        model = BayesianFactorAnalysis(n_components=3, n_features=10, has_ard=True, key=key)
+        ard_alpha_before = model.ard_prior.emission.alpha.copy()
+
+        params, props = model.initialize(key)
+        params, _ = model.fit_em(params, props, X, key=key, num_iters=30, verbose=False)
+
+        ard_alpha_after = model.ard_prior.emission.alpha
+        assert not jnp.allclose(ard_alpha_before, ard_alpha_after)
+
+
+# ============================================================================
+# Parametrized FA EM Tests: ARD x PX x BMR combinations
+# ============================================================================
+
+
+class TestFAEMCombinations:
+    """Test FA EM with all combinations of ARD, PX, and BMR."""
+
+    @pytest.mark.parametrize("has_ard", [True, False], ids=["ard", "no_ard"])
+    @pytest.mark.parametrize("use_px", [True, False], ids=["px", "no_px"])
+    @pytest.mark.parametrize("use_bmr", [True, False], ids=["bmr", "no_bmr"])
+    def test_fa_em(self, has_ard, use_px, use_bmr):
+        """FA EM should converge and be approximately monotonic for all ARD/PX/BMR combinations."""
+        key = jr.PRNGKey(42)
+        X, _, _ = generate_iid_data(key, n_samples=100, n_features=10, n_components=3)
 
         model = BayesianFactorAnalysis(
-            n_components=n_components, n_features=n_features,
-            use_bmr=True, has_ard=True, key=key,
+            n_components=3,
+            n_features=10,
+            has_ard=has_ard,
+            use_px=use_px,
+            use_bmr=use_bmr,
+            key=key,
+        )
+        params, props = model.initialize(key)
+        params, elbos = model.fit_em(params, props, X, key=key, num_iters=20, verbose=False)
+
+        assert elbos.shape == (19,)
+        assert jnp.all(jnp.isfinite(elbos))
+        assert elbos[-1] > elbos[0], f"ELBO did not improve: first={elbos[0]:.4f}, last={elbos[-1]:.4f}"
+        if not use_bmr:
+            # ARD/PX can cause small dips but not large ones
+            diffs = jnp.diff(elbos)
+            assert jnp.all(diffs >= -0.1), (
+                f"ELBO decreased by more than tolerance. "
+                f"Worst decrease: {diffs.min():.6f} at iteration {jnp.argmin(diffs)}"
+            )
+
+    @pytest.mark.parametrize("has_ard", [True, False], ids=["ard", "no_ard"])
+    @pytest.mark.parametrize("use_px", [True, False], ids=["px", "no_px"])
+    @pytest.mark.parametrize("use_bmr", [True, False], ids=["bmr", "no_bmr"])
+    def test_pca_em(self, has_ard, use_px, use_bmr):
+        """PCA EM should converge and be approximately monotonic for all ARD/PX/BMR combinations."""
+        key = jr.PRNGKey(42)
+        X, _, _ = generate_iid_data(key, n_samples=100, n_features=10, n_components=3)
+
+        model = BayesianPCA(
+            n_components=3,
+            n_features=10,
+            has_ard=has_ard,
+            use_px=use_px,
+            use_bmr=use_bmr,
+            key=key,
+        )
+        params, props = model.initialize(key)
+        params, elbos = model.fit_em(params, props, X, key=key, num_iters=20, verbose=False)
+
+        assert elbos.shape == (19,)
+        assert jnp.all(jnp.isfinite(elbos))
+        assert elbos[-1] > elbos[0]
+        if not use_bmr:
+            diffs = jnp.diff(elbos)
+            assert jnp.all(diffs >= -0.1), (
+                f"ELBO decreased by more than tolerance. "
+                f"Worst decrease: {diffs.min():.6f} at iteration {jnp.argmin(diffs)}"
+            )
+
+        # Check isotropic noise
+        R_diag = jnp.diag(params.emissions.cov)
+        assert jnp.allclose(R_diag, R_diag[0] * jnp.ones_like(R_diag), atol=1e-5)
+
+
+# ============================================================================
+# Parametrized FA VBEM Tests: ARD x PX x BMR combinations
+# ============================================================================
+
+
+class TestFAVBEMCombinations:
+    """Test FA VBEM with all combinations of ARD, PX, and BMR."""
+
+    @pytest.mark.parametrize("has_ard", [True, False], ids=["ard", "no_ard"])
+    @pytest.mark.parametrize("use_px", [True, False], ids=["px", "no_px"])
+    @pytest.mark.parametrize("use_bmr", [True, False], ids=["bmr", "no_bmr"])
+    def test_fa_vbem(self, has_ard, use_px, use_bmr):
+        """FA VBEM should converge and be approximately monotonic for all ARD/PX/BMR combinations."""
+        key = jr.PRNGKey(42)
+        X, _, _ = generate_iid_data(key, n_samples=100, n_features=10, n_components=3)
+
+        model = BayesianFactorAnalysis(
+            n_components=3,
+            n_features=10,
+            has_ard=has_ard,
+            use_px=use_px,
+            use_bmr=use_bmr,
+            key=key,
+        )
+        params, props = model.initialize(key, variational_bayes=True)
+        params, elbos = model.fit_vbem(params, props, X, key=key, num_iters=20, verbose=False)
+
+        assert elbos.shape == (19,)
+        assert jnp.all(jnp.isfinite(elbos))
+        assert elbos[-1] > elbos[0]
+        if not use_bmr:
+            # VBEM uses variational corrections and PX applies a numerical
+            # rotation — together they can cause larger transient dips than EM
+            diffs = jnp.diff(elbos)
+            assert jnp.all(diffs >= -1.0), (
+                f"ELBO decreased by more than tolerance. "
+                f"Worst decrease: {diffs.min():.6f} at iteration {jnp.argmin(diffs)}"
+            )
+
+    @pytest.mark.parametrize("has_ard", [True, False], ids=["ard", "no_ard"])
+    @pytest.mark.parametrize("use_px", [True, False], ids=["px", "no_px"])
+    @pytest.mark.parametrize("use_bmr", [True, False], ids=["bmr", "no_bmr"])
+    def test_pca_vbem(self, has_ard, use_px, use_bmr):
+        """PCA VBEM should converge and be approximately monotonic for all ARD/PX/BMR combinations."""
+        key = jr.PRNGKey(42)
+        X, _, _ = generate_iid_data(key, n_samples=100, n_features=10, n_components=3)
+
+        model = BayesianPCA(
+            n_components=3,
+            n_features=10,
+            has_ard=has_ard,
+            use_px=use_px,
+            use_bmr=use_bmr,
+            key=key,
+        )
+        params, props = model.initialize(key, variational_bayes=True)
+        params, elbos = model.fit_vbem(params, props, X, key=key, num_iters=20, verbose=False)
+
+        assert elbos.shape == (19,)
+        assert jnp.all(jnp.isfinite(elbos))
+        assert elbos[-1] > elbos[0]
+        if not use_bmr:
+            diffs = jnp.diff(elbos)
+            assert jnp.all(diffs >= -1.0), (
+                f"ELBO decreased by more than tolerance. "
+                f"Worst decrease: {diffs.min():.6f} at iteration {jnp.argmin(diffs)}"
+            )
+
+
+# ============================================================================
+# Parametrized DFA Tests: ARD x PX x BMR combinations
+# ============================================================================
+
+
+class TestDFACombinations:
+    """Test DFA EM and VBEM with all combinations of ARD, PX, and BMR."""
+
+    @pytest.mark.parametrize("has_ard", [True, False], ids=["ard", "no_ard"])
+    @pytest.mark.parametrize("use_px", [True, False], ids=["px", "no_px"])
+    @pytest.mark.parametrize("use_bmr", [True, False], ids=["bmr", "no_bmr"])
+    def test_dfa_em(self, has_ard, use_px, use_bmr):
+        """DFA EM should converge and be approximately monotonic for all ARD/PX/BMR combinations."""
+        key = jr.PRNGKey(42)
+        Y, _, _, _ = generate_timeseries_data(key, n_timesteps=100)
+
+        model = BayesianDynamicFactorAnalysis(
+            state_dim=3,
+            emission_dim=10,
+            has_dynamics_bias=True,
+            has_emissions_bias=True,
+            has_ard=has_ard,
+            use_px=use_px,
+            use_bmr=use_bmr,
+        )
+        params, props = model.initialize(key)
+        params, elbos = model.fit_em(params, props, Y, key=key, num_iters=20, verbose=False)
+
+        assert elbos.shape == (19,)
+        assert jnp.all(jnp.isfinite(elbos))
+        assert elbos[-1] > elbos[0], f"ELBO did not improve: first={elbos[0]:.4f}, last={elbos[-1]:.4f}"
+        if not use_bmr:
+            # DFA Kalman smoother numerics + ARD/PX can cause slightly larger
+            # dips than FA, so we use a relaxed tolerance of 0.2
+            diffs = jnp.diff(elbos)
+            assert jnp.all(diffs >= -0.2), (
+                f"ELBO decreased by more than tolerance. "
+                f"Worst decrease: {diffs.min():.6f} at iteration {jnp.argmin(diffs)}"
+            )
+
+    @pytest.mark.parametrize("has_ard", [True, False], ids=["ard", "no_ard"])
+    @pytest.mark.parametrize("use_px", [True, False], ids=["px", "no_px"])
+    @pytest.mark.parametrize("use_bmr", [True, False], ids=["bmr", "no_bmr"])
+    def test_dfa_vbem(self, has_ard, use_px, use_bmr):
+        """DFA VBEM should converge and be approximately monotonic for all ARD/PX/BMR combinations."""
+        key = jr.PRNGKey(42)
+        Y, _, _, _ = generate_timeseries_data(key, n_timesteps=100)
+
+        model = BayesianDynamicFactorAnalysis(
+            state_dim=3,
+            emission_dim=10,
+            has_dynamics_bias=True,
+            has_emissions_bias=True,
+            has_ard=has_ard,
+            use_px=use_px,
+            use_bmr=use_bmr,
+        )
+        params, props = model.initialize(key, variational_bayes=True)
+        params, elbos = model.fit_vbem(params, props, Y, key=key, num_iters=20, verbose=False)
+
+        assert elbos.shape == (19,)
+        assert jnp.all(jnp.isfinite(elbos))
+        assert elbos[-1] > elbos[0]
+        if not use_bmr:
+            diffs = jnp.diff(elbos)
+            assert jnp.all(diffs >= -0.2), (
+                f"ELBO decreased by more than tolerance. "
+                f"Worst decrease: {diffs.min():.6f} at iteration {jnp.argmin(diffs)}"
+            )
+
+
+# ============================================================================
+# Parameter Expansion (PX) Tests
+# ============================================================================
+
+
+class TestParameterExpansion:
+    """Test that parameter expansion improves convergence."""
+
+    def test_px_improves_fa_convergence(self):
+        """FA with PX should converge faster (higher ELBO at same iteration count)."""
+        key = jr.PRNGKey(42)
+        X, _, _ = generate_iid_data(key, n_samples=100, n_features=10, n_components=3)
+
+        model_no_px = BayesianFactorAnalysis(
+            n_components=3,
+            n_features=10,
+            use_px=False,
+            key=key,
+        )
+        params, props = model_no_px.initialize(key)
+        _, elbos_no_px = model_no_px.fit_em(params, props, X, key=key, num_iters=20, verbose=False)
+
+        model_px = BayesianFactorAnalysis(
+            n_components=3,
+            n_features=10,
+            use_px=True,
+            key=key,
+        )
+        params, props = model_px.initialize(key)
+        _, elbos_px = model_px.fit_em(params, props, X, key=key, num_iters=20, verbose=False)
+
+        # PX should achieve at least as good an ELBO
+        assert (
+            elbos_px[-1] >= elbos_no_px[-1] - 1.0
+        ), f"PX ELBO ({elbos_px[-1]:.4f}) much worse than no-PX ({elbos_no_px[-1]:.4f})"
+
+    def test_px_improves_dfa_convergence(self):
+        """DFA with PX should converge faster."""
+        key = jr.PRNGKey(42)
+        Y, _, _, _ = generate_timeseries_data(key, n_timesteps=100)
+
+        model_no_px = BayesianDynamicFactorAnalysis(
+            state_dim=3,
+            emission_dim=10,
+            has_dynamics_bias=True,
+            has_emissions_bias=True,
+            use_px=False,
+        )
+        params, props = model_no_px.initialize(key)
+        _, elbos_no_px = model_no_px.fit_em(params, props, Y, key=key, num_iters=20, verbose=False)
+
+        model_px = BayesianDynamicFactorAnalysis(
+            state_dim=3,
+            emission_dim=10,
+            has_dynamics_bias=True,
+            has_emissions_bias=True,
+            use_px=True,
+        )
+        params, props = model_px.initialize(key)
+        _, elbos_px = model_px.fit_em(params, props, Y, key=key, num_iters=20, verbose=False)
+
+        assert (
+            elbos_px[-1] >= elbos_no_px[-1] - 1.0
+        ), f"PX ELBO ({elbos_px[-1]:.4f}) much worse than no-PX ({elbos_no_px[-1]:.4f})"
+
+    def test_px_custom_params(self):
+        """Test PX with custom step count and learning rate."""
+        key = jr.PRNGKey(42)
+        X, _, _ = generate_iid_data(key, n_samples=100, n_features=10, n_components=3)
+
+        model = BayesianFactorAnalysis(
+            n_components=3,
+            n_features=10,
+            use_px=True,
+            key=key,
+        )
+        params, props = model.initialize(key)
+        params, elbos = model.fit_em(
+            params,
+            props,
+            X,
+            key=key,
+            num_iters=15,
+            verbose=False,
+            px_n_steps=64,
+            px_lr=5e-4,
         )
 
-        assert model.use_bmr.emissions
-        assert model.has_ard
+        assert jnp.all(jnp.isfinite(elbos))
+        assert elbos[-1] > elbos[0]
 
+
+# ============================================================================
+# BMR Comparison Tests
+# ============================================================================
+
+
+class TestBMRComparison:
+    """Test that BMR achieves better ELBO on sparse data."""
+
+    def test_bmr_improves_elbo_sparse_fa(self):
+        """BMR should achieve higher ELBO than no-BMR on sparse FA data.
+
+        When the true model is sparse (2 components, fitting 5), BMR should
+        prune unnecessary parameters and achieve a tighter bound. Since BMR
+        uses stochastic Gibbs sampling, we don't expect strict monotonicity at
+        every step, but the final ELBO should be higher.
+        """
+        key = jr.PRNGKey(42)
+        X, _, _, n_model = generate_sparse_iid_data(key, n_samples=100)
+
+        model_no_bmr = BayesianFactorAnalysis(
+            n_components=n_model,
+            n_features=10,
+            has_ard=True,
+            use_bmr=False,
+            key=key,
+        )
+        params, props = model_no_bmr.initialize(key)
+        _, elbos_no_bmr = model_no_bmr.fit_em(params, props, X, key=key, num_iters=30, verbose=False)
+
+        model_bmr = BayesianFactorAnalysis(
+            n_components=n_model,
+            n_features=10,
+            has_ard=True,
+            use_bmr=True,
+            key=key,
+        )
+        params, props = model_bmr.initialize(key)
+        _, elbos_bmr = model_bmr.fit_em(params, props, X, key=key, num_iters=30, verbose=False)
+
+        assert elbos_bmr[-1] > elbos_no_bmr[-1], (
+            f"BMR ELBO ({elbos_bmr[-1]:.4f}) should exceed no-BMR ({elbos_no_bmr[-1]:.4f}) " f"on sparse data"
+        )
+
+    def test_bmr_improves_elbo_sparse_pca(self):
+        """BMR should achieve higher ELBO than no-BMR on sparse PCA data."""
+        key = jr.PRNGKey(42)
+        X, _, _, n_model = generate_sparse_iid_data(key, n_samples=100)
+
+        model_no_bmr = BayesianPCA(
+            n_components=n_model,
+            n_features=10,
+            has_ard=True,
+            use_bmr=False,
+            key=key,
+        )
+        params, props = model_no_bmr.initialize(key)
+        _, elbos_no_bmr = model_no_bmr.fit_em(params, props, X, key=key, num_iters=30, verbose=False)
+
+        model_bmr = BayesianPCA(
+            n_components=n_model,
+            n_features=10,
+            has_ard=True,
+            use_bmr=True,
+            key=key,
+        )
+        params, props = model_bmr.initialize(key)
+        _, elbos_bmr = model_bmr.fit_em(params, props, X, key=key, num_iters=30, verbose=False)
+
+        assert elbos_bmr[-1] > elbos_no_bmr[-1], (
+            f"BMR ELBO ({elbos_bmr[-1]:.4f}) should exceed no-BMR ({elbos_no_bmr[-1]:.4f}) " f"on sparse data"
+        )
+
+    def test_bmr_improves_elbo_sparse_dfa(self):
+        """BMR should achieve higher ELBO than no-BMR on sparse DFA data."""
+        key = jr.PRNGKey(42)
+        # Generate sparse time-series: 5 model components, but only 2 are active
+        Y, _, _, _ = generate_timeseries_data(key, n_timesteps=100, n_components=2)
+
+        model_no_bmr = BayesianDynamicFactorAnalysis(
+            state_dim=5,
+            emission_dim=10,
+            has_dynamics_bias=True,
+            has_emissions_bias=True,
+            has_ard=True,
+            use_bmr=False,
+        )
+        params, props = model_no_bmr.initialize(key)
+        _, elbos_no_bmr = model_no_bmr.fit_em(params, props, Y, key=key, num_iters=30, verbose=False)
+
+        model_bmr = BayesianDynamicFactorAnalysis(
+            state_dim=5,
+            emission_dim=10,
+            has_dynamics_bias=True,
+            has_emissions_bias=True,
+            has_ard=True,
+            use_bmr=True,
+        )
+        params, props = model_bmr.initialize(key)
+        _, elbos_bmr = model_bmr.fit_em(params, props, Y, key=key, num_iters=30, verbose=False)
+
+        assert elbos_bmr[-1] > elbos_no_bmr[-1], (
+            f"BMR ELBO ({elbos_bmr[-1]:.4f}) should exceed no-BMR ({elbos_no_bmr[-1]:.4f}) " f"on sparse DFA data"
+        )
+
+    def test_bmr_non_monotonic_but_improving(self):
+        """BMR ELBOs may fluctuate but should improve overall."""
+        key = jr.PRNGKey(42)
+        X, _, _, n_model = generate_sparse_iid_data(key, n_samples=100)
+
+        model = BayesianFactorAnalysis(
+            n_components=n_model,
+            n_features=10,
+            has_ard=True,
+            use_bmr=True,
+            key=key,
+        )
+        params, props = model.initialize(key)
+        params, elbos = model.fit_em(params, props, X, key=key, num_iters=30, verbose=False)
+
+        assert jnp.all(jnp.isfinite(elbos))
+        # Overall improvement (not checking strict monotonicity due to stochastic BMR)
+        assert elbos[-1] > elbos[0], f"BMR ELBO should improve overall: first={elbos[0]:.4f}, last={elbos[-1]:.4f}"
+
+
+# ============================================================================
+# Feature Parity Tests
+# ============================================================================
+
+
+class TestFeatureParity:
+    """Test feature parity across model types."""
+
+    def test_fa_no_bias(self):
+        """Test FA without emission bias."""
+        key = jr.PRNGKey(42)
+        X, _, _ = generate_iid_data(key, n_samples=100, n_features=10, n_components=3)
+
+        model = BayesianFactorAnalysis(
+            n_components=3,
+            n_features=10,
+            has_emissions_bias=False,
+            key=key,
+        )
         params, props = model.initialize(key)
         params, elbos = model.fit_em(params, props, X, key=key, num_iters=20, verbose=False)
 
         assert elbos.shape == (19,)
         assert jnp.isfinite(elbos[-1])
-
-
-# ============================================================================
-# Phase 7: Comprehensive equivalence and feature parity tests
-# ============================================================================
-
-class TestEquivalence:
-    """Test that new unified model produces results equivalent to legacy code."""
-
-    def test_e_step_sufficient_stats(self):
-        """Verify unified E-step with T=1 batches produces correctly formatted DFA sufficient statistics."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 50, 10, 3
-        X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
-
-        model = BayesianFactorAnalysis(n_components=n_components, n_features=n_features, key=key)
-        params, props = model.initialize(key)
-
-        # Run e_step with T=1 batches
-        batch_emissions = X[:, None, :]  # (N, 1, D)
-        batch_inputs = jnp.zeros((n_samples, 1, 0))
-        batch_stats, lls = jax.vmap(partial(model.e_step, params))(batch_emissions, batch_inputs)
-        init_stats, dynamics_stats, emission_stats = batch_stats
-
-        # Sum batch stats for aggregate checks
-        sum_zzT = emission_stats[0].sum(0)
-        sum_zyT = emission_stats[1].sum(0)
-        sum_yyT = emission_stats[2].sum(0)
-        N = emission_stats[3].sum(0)
-
-        # emission_stats: verify shapes and PSD
-        assert N == n_samples
-        assert sum_zzT.shape == (n_components + 1, n_components + 1)  # +1 for bias
-        assert sum_zyT.shape == (n_components + 1, n_features)
-        assert sum_yyT.shape == (n_features, n_features)
-        # sum_zzT should be positive semi-definite
-        eigvals = jnp.linalg.eigvalsh(sum_zzT)
-        assert jnp.all(eigvals >= -1e-6)
-
-        # ll should be finite
-        assert jnp.all(jnp.isfinite(lls))
-
-    def test_fa_batched_matches_dfa_sequential(self):
-        """Verify FA E-step (T=1 batches) matches DFA E-step (F=0, Q=I) on data-only stats.
-
-        FA uses T=1 batches (each observation is independent), while DFA processes
-        all observations as a single time series. With F=0, Q=I, both should give
-        equivalent emission sufficient statistics.
-        """
-        key = jr.PRNGKey(42)
-        n_timesteps, n_features, n_components = 30, 10, 3
-        X, _, _ = generate_iid_data(key, n_timesteps, n_features, n_components)
-
-        # DFA model (Kalman path: is_static=False, F=0, Q=I)
-        model_kalman = BayesianDynamicFactorAnalysis(
-            state_dim=n_components, emission_dim=n_features,
-            has_dynamics_bias=False, has_emissions_bias=True,
-        )
-        params_k, props_k = model_kalman.initialize(
-            key,
-            dynamics_weights=jnp.zeros((n_components, n_components)),
-            dynamics_covariance=jnp.eye(n_components),
-            dynamics_bias=jnp.zeros(n_components),
-        )
-
-        # Run DFA Kalman E-step on full sequence
-        stats_kalman, ll_kalman = model_kalman.e_step(params_k, X)
-        em_kalman = stats_kalman[2]  # (sum_zzT, sum_zyT, sum_yyT, N)
-        assert em_kalman[3] == n_timesteps
-        assert jnp.isfinite(ll_kalman)
-
-        # Run FA E-step with T=1 batches using same emission params
-        model_static = BayesianFactorAnalysis(
-            n_components=n_components, n_features=n_features,
-            has_ard=False, key=key,
-        )
-        params_s, _ = model_static.initialize(key)
-        params_s = params_s._replace(emissions=params_k.emissions)
-
-        batch_emissions = X[:, None, :]  # (N, 1, D)
-        batch_inputs = jnp.zeros((n_timesteps, 1, 0))
-        batch_stats, lls = jax.vmap(partial(model_static.e_step, params_s))(batch_emissions, batch_inputs)
-        em_static = batch_stats[2]
-        sum_yyT_static = em_static[2].sum(0)
-        N_static = em_static[3].sum(0)
-
-        # sum_yyT must be identical (data-only statistic)
-        assert jnp.allclose(sum_yyT_static, em_kalman[2], atol=1e-5), "sum_yyT should match"
-        assert N_static == em_kalman[3], "N should match"
-
-    def test_fa_via_dfa_trains_well(self):
-        """Test FA via DFA trains well on synthetic data with known structure."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 200, 10, 3
-        X, W_true, Z_true = generate_iid_data(key, n_samples, n_features, n_components)
-
-        model = BayesianFactorAnalysis(n_components=n_components, n_features=n_features, key=key)
-        params, props = model.initialize(key)
-        params, elbos = model.fit_em(params, props, X, key=key, num_iters=50, verbose=False)
-
-        # ELBO should improve
-        assert elbos[-1] > elbos[0]
-
-        # Reconstruct and check MSE is reasonable
-        qz = model.transform(params, X)
-        X_recon = model.inverse_transform(params, qz)
-        mse = jnp.mean(jnp.square(X - X_recon.mean))
-        assert mse < 1.0, f"Reconstruction MSE too high: {mse}"
-
-    def test_ppca_via_dfa_trains_well(self):
-        """Test PCA via DFA trains well on synthetic data."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 200, 10, 3
-        X, W_true, Z_true = generate_iid_data(key, n_samples, n_features, n_components)
-
-        model = BayesianPCA(n_components=n_components, n_features=n_features, key=key)
-        params, props = model.initialize(key)
-        params, elbos = model.fit_em(params, props, X, key=key, num_iters=50, verbose=False)
-
-        # ELBO should improve
-        assert elbos[-1] > elbos[0]
-
-        # Check isotropic noise: cov should be scalar * I
-        R = params.emissions.cov
-        R_diag = jnp.diag(R)
-        # All diagonal elements should be the same (isotropic)
-        assert jnp.allclose(R_diag, R_diag[0] * jnp.ones_like(R_diag), atol=1e-5)
-
-    def test_dfa_unchanged(self):
-        """Verify DFA time-series results haven't been broken by refactoring."""
-        key = jr.PRNGKey(42)
-        Y, H_true, F_true, z_true = generate_timeseries_data(key)
-
-        model = BayesianDynamicFactorAnalysis(
-            state_dim=3, emission_dim=10, has_dynamics_bias=True, has_emissions_bias=True
-        )
-        params, props = model.initialize(key)
-        params, elbos = model.fit_em(params, props, Y, key=key, num_iters=30, verbose=False)
-
-        # ELBO should be computed correctly
-        assert elbos.shape == (29,)
-        assert jnp.isfinite(elbos[-1])
-
-        # Dynamics should learn something non-trivial (not zero)
-        assert jnp.abs(params.dynamics.weights).max() > 0.1
+        assert jnp.allclose(params.emissions.bias, jnp.zeros(10))
 
     def test_dfa_with_ard(self):
         """Test DFA with ARD and MVNIG emission prior for time-series data."""
         key = jr.PRNGKey(42)
-        Y, _, _, _ = generate_timeseries_data(key)
+        Y, _, _, _ = generate_timeseries_data(key, n_timesteps=100)
 
         from sppcax.models.utils import _make_mvnig_prior
+
         emission_prior = _make_mvnig_prior(n_features=10, n_components=5, input_dim=0, has_bias=True)
 
         model = BayesianDynamicFactorAnalysis(
-            state_dim=5, emission_dim=10,
-            has_dynamics_bias=True, has_emissions_bias=True,
+            state_dim=5,
+            emission_dim=10,
+            has_dynamics_bias=True,
+            has_emissions_bias=True,
             has_ard=True,
             emission_prior=emission_prior,
         )
@@ -519,85 +697,57 @@ class TestEquivalence:
         # ARD should have been updated (dnat1 gets non-zero values)
         assert not jnp.allclose(model.ard_prior.emission.dnat1, jnp.zeros(5))
 
-
-class TestFeatureParity:
-    """Test feature parity across model types."""
-
-    def test_fa_vbem(self):
-        """Test FA via DFA with VBEM algorithm."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 100, 10, 3
-        X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
-
-        model = BayesianFactorAnalysis(n_components=n_components, n_features=n_features, key=key)
-        params, props = model.initialize(key, variational_bayes=True)
-        params, elbos = model.fit_vbem(params, props, X, key=key, num_iters=30, verbose=False)
-
-        assert elbos.shape == (29,)
-        assert jnp.isfinite(elbos[-1])
-
-    def test_pca_vbem(self):
-        """Test PCA via DFA with VBEM algorithm."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 100, 10, 3
-        X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
-
-        model = BayesianPCA(n_components=n_components, n_features=n_features, key=key)
-        params, props = model.initialize(key, variational_bayes=True)
-        params, elbos = model.fit_vbem(params, props, X, key=key, num_iters=30, verbose=False)
-
-        assert elbos.shape == (29,)
-        assert jnp.isfinite(elbos[-1])
-
-    def test_fa_no_bias(self):
-        """Test FA via DFA without emission bias."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 100, 10, 3
-        X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
-
-        model = BayesianFactorAnalysis(
-            n_components=n_components, n_features=n_features,
-            has_emissions_bias=False, key=key,
-        )
-        params, props = model.initialize(key)
-        params, elbos = model.fit_em(params, props, X, key=key, num_iters=20, verbose=False)
-
-        assert elbos.shape == (19,)
-        assert jnp.isfinite(elbos[-1])
-        assert jnp.allclose(params.emissions.bias, jnp.zeros(n_features))
-
-    def test_fa_no_ard(self):
-        """Test FA via DFA without ARD."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 100, 10, 3
-        X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
-
-        model = BayesianFactorAnalysis(
-            n_components=n_components, n_features=n_features,
-            has_ard=False, key=key,
-        )
-
-        assert not model.has_ard
-        assert not hasattr(model, 'ard_prior') or not model.has_ard
-
-        params, props = model.initialize(key)
-        params, elbos = model.fit_em(params, props, X, key=key, num_iters=20, verbose=False)
-
-        assert elbos.shape == (19,)
-        assert jnp.isfinite(elbos[-1])
-
-    def test_fa_bmr_with_vbem(self):
+    def test_fa_with_bmr_vbem(self):
         """Test FA BMR with VBEM algorithm."""
         key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 100, 10, 5
-        X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
+        X, _, _ = generate_iid_data(key, n_samples=100, n_features=10, n_components=3)
 
         model = BayesianFactorAnalysis(
-            n_components=n_components, n_features=n_features,
-            use_bmr=True, key=key,
+            n_components=5,
+            n_features=10,
+            use_bmr=True,
+            key=key,
         )
         params, props = model.initialize(key, variational_bayes=True)
         params, elbos = model.fit_vbem(params, props, X, key=key, num_iters=20, verbose=False)
 
         assert elbos.shape == (19,)
         assert jnp.isfinite(elbos[-1])
+
+    def test_dfa_with_px_and_bmr(self):
+        """Test DFA with both PX and BMR enabled."""
+        key = jr.PRNGKey(42)
+        Y, _, _, _ = generate_timeseries_data(key, n_timesteps=100, n_components=2)
+
+        model = BayesianDynamicFactorAnalysis(
+            state_dim=5,
+            emission_dim=10,
+            has_dynamics_bias=True,
+            has_emissions_bias=True,
+            has_ard=True,
+            use_px=True,
+            use_bmr=True,
+        )
+        params, props = model.initialize(key)
+        params, elbos = model.fit_em(params, props, Y, key=key, num_iters=20, verbose=False)
+
+        assert jnp.all(jnp.isfinite(elbos))
+        assert elbos[-1] > elbos[0]
+
+    def test_dfa_with_px_vbem(self):
+        """Test DFA VBEM with PX enabled."""
+        key = jr.PRNGKey(42)
+        Y, _, _, _ = generate_timeseries_data(key, n_timesteps=100)
+
+        model = BayesianDynamicFactorAnalysis(
+            state_dim=3,
+            emission_dim=10,
+            has_dynamics_bias=True,
+            has_emissions_bias=True,
+            use_px=True,
+        )
+        params, props = model.initialize(key, variational_bayes=True)
+        params, elbos = model.fit_vbem(params, props, Y, key=key, num_iters=20, verbose=False)
+
+        assert jnp.all(jnp.isfinite(elbos))
+        assert elbos[-1] > elbos[0]

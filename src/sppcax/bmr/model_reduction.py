@@ -9,7 +9,7 @@ from multipledispatch import dispatch
 
 from ..distributions import Beta, MultivariateNormal as MVN, MultivariateNormalInverseGamma as MVNIG
 from ..types import PRNGKey
-from .delta_f import gibbs_sampler_mvn, gibbs_sampler_mvnig, gibbs_sampler_with_ard
+from .delta_f import gibbs_sampler_mvn, gibbs_sampler_mvnig
 
 from dynamax.utils.distributions import NormalInverseWishart as NIW
 
@@ -47,7 +47,7 @@ def prune_params(post: NIW, prior: NIW, *, key: PRNGKey, max_iter: int = 4) -> N
 
 
 @dispatch(MVNIG, MVNIG)
-def prune_params(post: MVNIG, prior: MVNIG, *, key: PRNGKey, max_iter: int = 8, ard_post=None) -> MVNIG:  # noqa: F811
+def prune_params(post: MVNIG, prior: MVNIG, *, key: PRNGKey, max_iter: int = 8) -> MVNIG:  # noqa: F811
     """Applies Bayesian model reduction to distribution, where Inverse Gamma priors
     get optimized, and individual elements of the Multivariate Normal get pruned to
     maximize change in the variational free energy, hence minimize the upper bound
@@ -58,9 +58,6 @@ def prune_params(post: MVNIG, prior: MVNIG, *, key: PRNGKey, max_iter: int = 8, 
         prior: Prior MultivariateNormalInverseGamma distribution
         key: Random number generator key
         max_iter: Maximal number of iterations for the Gibbs sampler
-        ard_post: Optional ARD Gamma posterior over column precisions. When provided,
-            uses ARD-aware Gibbs sampler that accounts for column precision in
-            the free energy change computation.
 
     Returns:
         Optimized posterior MultivariateNormalInverseGamma distribution
@@ -74,10 +71,7 @@ def prune_params(post: MVNIG, prior: MVNIG, *, key: PRNGKey, max_iter: int = 8, 
         pi = alpha / (alpha + beta)  # Beta(alpha, beta).sample(_key)
 
         key, _key = jr.split(key)
-        if ard_post is not None:
-            delta_f, mask = gibbs_sampler_with_ard(_key, post, ard_post, pi, mask, delta_f)
-        else:
-            delta_f, mask = gibbs_sampler_mvnig(_key, post, prior, pi, mask, delta_f)
+        delta_f, mask = gibbs_sampler_mvnig(_key, post, prior, pi, mask, delta_f)
 
         alpha = alpha_0 / len(alpha) + mask.sum(0)
         beta = 1.0 + (1 - mask).sum(0)
@@ -98,9 +92,15 @@ def prune_params(post: MVNIG, prior: MVNIG, *, key: PRNGKey, max_iter: int = 8, 
     post_nat1 = post.mvn.nat1
     pruned_post_mean = (~mask) * post.mvn.mean
 
-    dnat2 = post.inv_gamma.dnat2
-    dnat2 -= jnp.sum(pruned_post_mean * post_nat1, -1) / 2
-    dnat2 += jnp.sum(pruned_prior_mean * prior_nat1, -1) / 2
+    # Per-row corrections from pruned parameters
+    correction = -jnp.sum(pruned_post_mean * post_nat1, -1) / 2 + jnp.sum(pruned_prior_mean * prior_nat1, -1) / 2
+
+    # For isotropic noise (scalar dnat2), sum the per-row corrections to
+    # preserve the original scalar shape and ensure lax.cond branch compatibility.
+    if post.inv_gamma.dnat2.ndim == 0:
+        correction = correction.sum()
+
+    dnat2 = post.inv_gamma.dnat2 + correction
 
     # optimize Inverse Gamma priors
     nat2_0 = jnp.minimum(dnat2 / (post.inv_gamma.alpha - 1), -1 / (post.inv_gamma.alpha - 1))

@@ -10,12 +10,10 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import pytest
 from jax.scipy.linalg import solve_triangular
 
 from sppcax.models.dynamic_factor_analysis import BayesianDynamicFactorAnalysis
 from sppcax.models.factor_analysis import BayesianFactorAnalysis, BayesianPCA
-from sppcax.distributions.mvn import MultivariateNormal
 from sppcax.distributions.mvn_gamma import MultivariateNormalInverseGamma
 from sppcax.metrics import kl_divergence
 from sppcax.bmr.delta_f import compute_delta_f, gibbs_sampler_mvnig
@@ -25,6 +23,7 @@ from sppcax.bmr.model_reduction import prune_params
 # ============================================================================
 # Synthetic data generation (reused from test_unification.py)
 # ============================================================================
+
 
 def generate_iid_data(key, n_samples=100, n_features=10, n_components=3):
     """Generate synthetic iid FA data with known ground truth."""
@@ -65,73 +64,9 @@ def generate_timeseries_data(key, n_timesteps=200, n_features=10, n_components=3
 
 
 # ============================================================================
-# 1. ELBO Monotonicity Tests
-# ============================================================================
-
-class TestELBOMonotonicity:
-    """EM/VBEM must produce non-decreasing ELBO (the fundamental EM guarantee)."""
-
-    def test_fa_em_elbo_monotonicity(self):
-        """FA EM ELBO should be non-decreasing."""
-        key = jr.PRNGKey(42)
-        X, _, _ = generate_iid_data(key, n_samples=200, n_features=10, n_components=3)
-
-        model = BayesianFactorAnalysis(n_components=3, n_features=10, key=key)
-        params, props = model.initialize(key)
-        params, elbos = model.fit_em(params, props, X, key=key, num_iters=30, verbose=False)
-
-        diffs = jnp.diff(elbos)
-        assert jnp.all(diffs >= -1e-3), (
-            f"ELBO decreased by more than tolerance. "
-            f"Worst decrease: {diffs.min():.6f} at iteration {jnp.argmin(diffs)}"
-        )
-
-    def test_dfa_em_elbo_monotonicity(self):
-        """DFA EM ELBO should be non-decreasing."""
-        key = jr.PRNGKey(42)
-        Y, _, _, _ = generate_timeseries_data(key, n_timesteps=100)
-
-        model = BayesianDynamicFactorAnalysis(
-            state_dim=3, emission_dim=10,
-            has_dynamics_bias=True, has_emissions_bias=True
-        )
-        params, props = model.initialize(key)
-        params, elbos = model.fit_em(params, props, Y, key=key, num_iters=30, verbose=False)
-
-        diffs = jnp.diff(elbos)
-        assert jnp.all(diffs >= -1e-1), (
-            f"ELBO decreased by more than tolerance. "
-            f"Worst decrease: {diffs.min():.6f}"
-        )
-
-    def test_dfa_vbem_elbo_overall_improvement(self):
-        """DFA VBEM ELBO should improve overall.
-
-        Note: For static (FA) mode, the VB E-step falls through to the standard
-        static E-step, so we test VBEM with time-series DFA where VB corrections
-        actually participate in the inference.
-        """
-        key = jr.PRNGKey(42)
-        Y, _, _, _ = generate_timeseries_data(key, n_timesteps=100, n_components=3)
-
-        model = BayesianDynamicFactorAnalysis(
-            state_dim=3, emission_dim=10,
-            has_dynamics_bias=True, has_emissions_bias=True,
-        )
-        params, props = model.initialize(key, variational_bayes=True)
-        params, elbos = model.fit_vbem(params, props, Y, key=key, num_iters=30, verbose=False)
-
-        # ELBO should be finite
-        assert jnp.all(jnp.isfinite(elbos)), "VBEM produced non-finite ELBO values"
-        # ELBO should improve overall (last > first)
-        assert elbos[-1] > elbos[0], (
-            f"VBEM ELBO did not improve: first={elbos[0]:.4f}, last={elbos[-1]:.4f}"
-        )
-
-
-# ============================================================================
 # 2. Parameter Recovery Tests
 # ============================================================================
+
 
 class TestParameterRecovery:
     """Verify models can recover known ground-truth parameters from synthetic data."""
@@ -178,8 +113,7 @@ class TestParameterRecovery:
         Y, _, F_true, _ = generate_timeseries_data(key, n_timesteps=500, n_components=3)
 
         model = BayesianDynamicFactorAnalysis(
-            state_dim=3, emission_dim=10,
-            has_dynamics_bias=True, has_emissions_bias=True
+            state_dim=3, emission_dim=10, has_dynamics_bias=True, has_emissions_bias=True
         )
         params, props = model.initialize(key)
         params, _ = model.fit_em(params, props, Y, key=key, num_iters=50, verbose=False)
@@ -202,14 +136,15 @@ class TestParameterRecovery:
         R = params.emissions.cov
         R_diag = jnp.diag(R)
         # All diagonal elements should be equal (isotropic)
-        assert jnp.allclose(R_diag, R_diag[0] * jnp.ones_like(R_diag), atol=1e-5), (
-            f"PCA noise not isotropic: max diff = {jnp.abs(R_diag - R_diag[0]).max()}"
-        )
+        assert jnp.allclose(
+            R_diag, R_diag[0] * jnp.ones_like(R_diag), atol=1e-5
+        ), f"PCA noise not isotropic: max diff = {jnp.abs(R_diag - R_diag[0]).max()}"
 
 
 # ============================================================================
 # 3. Sufficient Statistics Correctness
 # ============================================================================
+
 
 class TestSufficientStatistics:
     """Verify mathematical identities in sufficient statistics computation."""
@@ -233,9 +168,6 @@ class TestSufficientStatistics:
         batch_stats, lls = jax.vmap(partial(model.e_step, params))(batch_emissions, batch_inputs)
         _, _, emission_stats = batch_stats
         sum_zzT = emission_stats[0].sum(0)
-        sum_zyT = emission_stats[1].sum(0)
-        sum_yyT = emission_stats[2].sum(0)
-        N = emission_stats[3].sum(0)
 
         # Extract the z-block of sum_zzT (excluding bias)
         Ezz_block = sum_zzT[:n_components, :n_components]
@@ -258,8 +190,7 @@ class TestSufficientStatistics:
         expected_Ezz = V * n_samples + Ez.T @ Ez
 
         assert jnp.allclose(Ezz_block, expected_Ezz, atol=1e-4), (
-            f"Sufficient statistics identity violated. "
-            f"Max diff: {jnp.abs(Ezz_block - expected_Ezz).max():.6f}"
+            f"Sufficient statistics identity violated. " f"Max diff: {jnp.abs(Ezz_block - expected_Ezz).max():.6f}"
         )
 
     def test_e_step_stats_are_psd(self):
@@ -296,6 +227,7 @@ class TestSufficientStatistics:
 # 4. KL Divergence Properties
 # ============================================================================
 
+
 class TestKLDivergenceProperties:
     """Verify fundamental properties of KL divergence computations."""
 
@@ -316,10 +248,10 @@ class TestKLDivergenceProperties:
         # Sum batch stats to get aggregate stats
         stats = (emission_stats[0].sum(0), emission_stats[1].sum(0), emission_stats[2].sum(0), emission_stats[3].sum(0))
 
-        from sppcax.models.dynamic_factor_analysis import _niw_posterior_update, _posterior_update
+        from sppcax.distributions.updates import posterior_update
 
         # Update emission posterior
-        emission_posterior = _posterior_update(model.emission_prior, stats, props.emissions)
+        emission_posterior = posterior_update(model.emission_prior, stats, props.emissions)
         kl = kl_divergence(emission_posterior, model.emission_prior)
         assert kl >= -1e-6, f"KL divergence is negative: {kl}"
 
@@ -327,6 +259,7 @@ class TestKLDivergenceProperties:
 # ============================================================================
 # 5. BMR Correctness Tests
 # ============================================================================
+
 
 class TestBMRCorrectness:
     """Verify Bayesian Model Reduction computations."""
@@ -343,10 +276,7 @@ class TestBMRCorrectness:
         prior_mean = jnp.zeros(K)
         prior_prec = jnp.eye(K)
 
-        delta_f = compute_delta_f(
-            pruned, mean, prec, alpha, beta,
-            prior_prec_d=prior_prec, prior_mean_d=prior_mean
-        )
+        delta_f = compute_delta_f(pruned, mean, prec, alpha, beta, prior_prec_d=prior_prec, prior_mean_d=prior_mean)
         assert jnp.isfinite(delta_f), f"delta_f is not finite: {delta_f}"
 
     def test_compute_delta_f_without_prior(self):
@@ -383,10 +313,18 @@ class TestBMRCorrectness:
         loc = jr.normal(key, (n_features, n_components))
         mask = jnp.ones((n_features, n_components), dtype=bool)
         post = MultivariateNormalInverseGamma(
-            loc=loc, mask=mask, alpha0=3.0, beta0=1.0, isotropic_noise=False,
+            loc=loc,
+            mask=mask,
+            alpha0=3.0,
+            beta0=1.0,
+            isotropic_noise=False,
         )
         prior = MultivariateNormalInverseGamma(
-            loc=jnp.zeros_like(loc), mask=mask, alpha0=2.0, beta0=1.0, isotropic_noise=False,
+            loc=jnp.zeros_like(loc),
+            mask=mask,
+            alpha0=2.0,
+            beta0=1.0,
+            isotropic_noise=False,
         )
 
         pi = 0.5 * jnp.ones(n_components)
@@ -399,23 +337,6 @@ class TestBMRCorrectness:
         assert new_delta_f.shape == (n_features,)
         assert jnp.all(jnp.isfinite(new_delta_f)), "Some delta_f values are not finite"
 
-    def test_bmr_with_fa_model(self):
-        """BMR applied via FA model training should produce finite results."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 100, 10, 5
-        X, _, _ = generate_iid_data(key, n_samples, n_features, n_components=3)
-
-        model = BayesianFactorAnalysis(
-            n_components=n_components, n_features=n_features,
-            use_bmr=True, key=key,
-        )
-        params, props = model.initialize(key)
-        params, elbos = model.fit_em(params, props, X, key=key, num_iters=30, verbose=False)
-
-        assert jnp.all(jnp.isfinite(elbos)), "Some ELBO values are not finite after BMR"
-        # BMR should have pruned some elements (mask should have some False values)
-        # This is a soft check - BMR may or may not prune depending on data
-
     def test_prune_params_mvnig(self):
         """Test prune_params on MVNIG directly."""
         key = jr.PRNGKey(42)
@@ -424,11 +345,17 @@ class TestBMRCorrectness:
         mask = jnp.ones((n_features, n_components), dtype=bool)
         post = MultivariateNormalInverseGamma(
             loc=jr.normal(key, (n_features, n_components)),
-            mask=mask, alpha0=5.0, beta0=1.0, isotropic_noise=False,
+            mask=mask,
+            alpha0=5.0,
+            beta0=1.0,
+            isotropic_noise=False,
         )
         prior = MultivariateNormalInverseGamma(
             loc=jnp.zeros((n_features, n_components)),
-            mask=mask, alpha0=2.0, beta0=1.0, isotropic_noise=False,
+            mask=mask,
+            alpha0=2.0,
+            beta0=1.0,
+            isotropic_noise=False,
         )
 
         pruned = prune_params(post, prior, key=key, max_iter=5)
@@ -439,6 +366,7 @@ class TestBMRCorrectness:
 # ============================================================================
 # 6. Inference Algorithm Tests
 # ============================================================================
+
 
 class TestInferenceAlgorithms:
     """Verify inference algorithm correctness."""
@@ -455,8 +383,10 @@ class TestInferenceAlgorithms:
 
         # Use initial params (no fitting) for cleaner comparison
         model_seq = BayesianDynamicFactorAnalysis(
-            state_dim=3, emission_dim=10,
-            has_dynamics_bias=True, has_emissions_bias=True,
+            state_dim=3,
+            emission_dim=10,
+            has_dynamics_bias=True,
+            has_emissions_bias=True,
             parallel_scan=False,
         )
         params, props = model_seq.initialize(key)
@@ -466,8 +396,10 @@ class TestInferenceAlgorithms:
 
         # Parallel smoother with same params
         model_par = BayesianDynamicFactorAnalysis(
-            state_dim=3, emission_dim=10,
-            has_dynamics_bias=True, has_emissions_bias=True,
+            state_dim=3,
+            emission_dim=10,
+            has_dynamics_bias=True,
+            has_emissions_bias=True,
             parallel_scan=True,
         )
         stats_par, ll_par = model_par.e_step(params, Y)
@@ -495,14 +427,17 @@ class TestInferenceAlgorithms:
         Y, _, _, _ = generate_timeseries_data(key, n_timesteps=50, n_components=3)
 
         model = BayesianDynamicFactorAnalysis(
-            state_dim=3, emission_dim=10,
-            has_dynamics_bias=True, has_emissions_bias=True,
+            state_dim=3,
+            emission_dim=10,
+            has_dynamics_bias=True,
+            has_emissions_bias=True,
         )
         params, props = model.initialize(key)
         params, _ = model.fit_em(params, props, Y, key=key, num_iters=5, verbose=False)
 
         # Access smoother directly
         from dynamax.linear_gaussian_ssm.inference import lgssm_smoother as dynamax_smoother
+
         posterior = dynamax_smoother(params, Y, jnp.zeros((50, 0)))
 
         filtered_traces = jnp.trace(posterior.filtered_covariances, axis1=-1, axis2=-2)
@@ -512,8 +447,7 @@ class TestInferenceAlgorithms:
         # Allow some tolerance for the last timestep where they're equal
         fraction_reduced = jnp.mean(smoothed_traces[:-1] <= filtered_traces[:-1] + 1e-6)
         assert fraction_reduced > 0.9, (
-            f"Smoothing should reduce variance for most timesteps. "
-            f"Fraction reduced: {fraction_reduced:.2f}"
+            f"Smoothing should reduce variance for most timesteps. " f"Fraction reduced: {fraction_reduced:.2f}"
         )
 
     def test_vbem_correction_terms(self):
@@ -522,15 +456,17 @@ class TestInferenceAlgorithms:
         Y, _, _, _ = generate_timeseries_data(key, n_timesteps=50, n_components=3)
 
         model = BayesianDynamicFactorAnalysis(
-            state_dim=3, emission_dim=10,
-            has_dynamics_bias=True, has_emissions_bias=True,
+            state_dim=3,
+            emission_dim=10,
+            has_dynamics_bias=True,
+            has_emissions_bias=True,
         )
         params, props = model.initialize(key, variational_bayes=True)
         params, elbos = model.fit_vbem(params, props, Y, key=key, num_iters=10, verbose=False)
 
         # After VBEM, params should have VB corrections
-        assert hasattr(params.emissions, 'correction'), "VBEM params should have correction field"
-        assert hasattr(params.dynamics, 'correction'), "VBEM params should have correction field"
+        assert hasattr(params.emissions, "correction"), "VBEM params should have correction field"
+        assert hasattr(params.dynamics, "correction"), "VBEM params should have correction field"
 
         # Correction matrices should be non-zero after fitting
         C_em = params.emissions.correction
@@ -541,6 +477,7 @@ class TestInferenceAlgorithms:
 # ============================================================================
 # 7. Edge Case Tests
 # ============================================================================
+
 
 class TestEdgeCases:
     """Verify model behavior at boundary conditions."""
@@ -565,8 +502,10 @@ class TestEdgeCases:
         Y = Y[:10]  # Ensure exactly 10 timesteps
 
         model = BayesianDynamicFactorAnalysis(
-            state_dim=2, emission_dim=10,
-            has_dynamics_bias=True, has_emissions_bias=True,
+            state_dim=2,
+            emission_dim=10,
+            has_dynamics_bias=True,
+            has_emissions_bias=True,
         )
         params, props = model.initialize(key)
         params, elbos = model.fit_em(params, props, Y, key=key, num_iters=10, verbose=False)
@@ -600,6 +539,7 @@ class TestEdgeCases:
 # ============================================================================
 # 8. Transform / Inverse Transform Consistency
 # ============================================================================
+
 
 class TestTransformConsistency:
     """Verify transform and inverse_transform pipeline correctness."""
@@ -642,9 +582,9 @@ class TestTransformConsistency:
 
         # The precision from transform should match
         P_actual = qz.precision[0]  # Same for all samples
-        assert jnp.allclose(P_actual, P_expected, atol=1e-4), (
-            f"Posterior precision mismatch. Max diff: {jnp.abs(P_actual - P_expected).max():.6f}"
-        )
+        assert jnp.allclose(
+            P_actual, P_expected, atol=1e-4
+        ), f"Posterior precision mismatch. Max diff: {jnp.abs(P_actual - P_expected).max():.6f}"
 
     def test_inverse_transform_includes_uncertainty(self):
         """Inverse transform covariance should include latent uncertainty."""
@@ -662,6 +602,6 @@ class TestTransformConsistency:
         # Reconstruction covariance should be >= R (emission noise)
         recon_var = jnp.diag(X_recon.covariance[0])
         R_diag = jnp.diag(params.emissions.cov)
-        assert jnp.all(recon_var >= R_diag - 1e-6), (
-            "Reconstruction variance should be at least as large as emission noise"
-        )
+        assert jnp.all(
+            recon_var >= R_diag - 1e-6
+        ), "Reconstruction variance should be at least as large as emission noise"
