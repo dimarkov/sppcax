@@ -17,11 +17,6 @@ from jax import jit
 from sppcax.distributions.delta import Delta
 from sppcax.distributions.mvn import MultivariateNormal
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", DeprecationWarning)
-    from sppcax.models.factor_analysis_params import PFA, PPCA
-    from sppcax.models.factor_analysis_algorithms import fit, transform, e_step, m_step, compute_elbo
-
 from sppcax.models.dynamic_factor_analysis import BayesianDynamicFactorAnalysis
 from sppcax.models.factor_analysis import BayesianFactorAnalysis, BayesianPCA
 
@@ -74,89 +69,6 @@ def generate_timeseries_data(key, n_timesteps=200, n_features=10, n_components=3
     Y = z @ H_true.T + noise
 
     return Y, H_true, F_true, z
-
-
-# ============================================================================
-# Phase 1a: Reference outputs from current FA/PCA
-# ============================================================================
-
-class TestFABaseline:
-    """Record and verify baseline FA/PCA outputs."""
-
-    def test_pfa_baseline(self):
-        """Record PFA baseline: shapes, ELBO trend, and reproducibility."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 100, 10, 3
-        X, W_true, Z_true = generate_iid_data(key, n_samples, n_features, n_components)
-
-        model = PFA(n_components=n_components, n_features=n_features, key=jr.PRNGKey(0))
-        model, elbos = fit(model, X, n_iter=50, key=key)
-
-        # Shapes
-        assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
-        assert model.q_w_psi.expected_psi.shape == (n_features,)
-        assert model.q_tau.mean.shape == (n_components,)
-        assert len(elbos) == 50
-
-        # ELBO should generally increase (allow small dips due to numerical issues)
-        elbos_arr = jnp.array(elbos)
-        assert elbos_arr[-1] > elbos_arr[0], "ELBO should improve over training"
-
-        # Reproducibility: same seed => same result
-        model2 = PFA(n_components=n_components, n_features=n_features, key=jr.PRNGKey(0))
-        model2, elbos2 = fit(model2, X, n_iter=50, key=key)
-        assert jnp.allclose(jnp.array(elbos), jnp.array(elbos2), atol=1e-5)
-
-    def test_ppca_baseline(self):
-        """Record PPCA baseline: shapes and ELBO trend."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 100, 10, 3
-        X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
-
-        model = PPCA(n_components=n_components, n_features=n_features, key=jr.PRNGKey(0))
-        model, elbos = fit(model, X, n_iter=50, key=key)
-
-        # Shapes
-        assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
-        assert model.q_w_psi.inv_gamma.mean.shape == ()  # Scalar for PPCA
-        assert model.q_tau.mean.shape == (n_components,)
-
-        elbos_arr = jnp.array(elbos)
-        assert elbos_arr[-1] > elbos_arr[0], "ELBO should improve over training"
-
-    def test_pfa_with_bmr_baseline(self):
-        """Record PFA with BMR baseline."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 100, 10, 5
-        X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
-
-        model = PFA(
-            n_components=n_components,
-            n_features=n_features,
-            bmr_m_step=True,
-            optimize_with_bmr=True,
-            key=jr.PRNGKey(0),
-        )
-        model, elbos = fit(model, X, n_iter=50, key=key)
-
-        assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
-        assert len(elbos) <= 50  # May converge early
-
-    def test_pfa_with_bmr_e_step_baseline(self):
-        """Record PFA with BMR E-step baseline."""
-        key = jr.PRNGKey(42)
-        n_samples, n_features, n_components = 100, 10, 5
-        X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
-
-        model = PFA(
-            n_components=n_components,
-            n_features=n_features,
-            bmr_e_step=True,
-            key=jr.PRNGKey(0),
-        )
-        model, elbos = fit(model, X, n_iter=50, key=key)
-
-        assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
 
 
 # ============================================================================
@@ -214,29 +126,11 @@ class TestDFABaseline:
 
 
 # ============================================================================
-# Phase 1c: Performance benchmark - QR E-step vs Kalman with F=0, Q=I
+# Phase 1c: Performance benchmark - DFA E-step
 # ============================================================================
 
 class TestEStepPerformanceBenchmark:
-    """Compare FA QR-based E-step vs DFA Kalman smoother with trivial dynamics."""
-
-    def _run_fa_e_step(self, X, n_components, n_iters=5):
-        """Run FA E-step timing."""
-        key = jr.PRNGKey(0)
-        n_samples, n_features = X.shape
-        model = PFA(n_components=n_components, n_features=n_features, key=key)
-
-        X_dist = Delta(X)
-        # Warm up JIT
-        qz = e_step(model, X_dist)
-        qz.mean.block_until_ready()
-
-        start = time.perf_counter()
-        for _ in range(n_iters):
-            qz = e_step(model, X_dist)
-            qz.mean.block_until_ready()
-        elapsed = (time.perf_counter() - start) / n_iters
-        return elapsed
+    """Benchmark DFA Kalman smoother E-step."""
 
     def _run_dfa_e_step_as_fa(self, X, n_components, n_iters=5):
         """Run DFA E-step with F=0, Q=I (treating iid data as time series)."""
@@ -264,32 +158,6 @@ class TestEStepPerformanceBenchmark:
             ll.block_until_ready()
         elapsed = (time.perf_counter() - start) / n_iters
         return elapsed
-
-    def test_benchmark_e_step(self):
-        """Benchmark FA QR E-step vs DFA Kalman with F=0, Q=I."""
-        key = jr.PRNGKey(42)
-        results = []
-
-        configs = [
-            (50, 10, 2),
-            (200, 10, 5),
-            (200, 20, 5),
-            (1000, 10, 5),
-        ]
-
-        for n_samples, n_features, n_components in configs:
-            X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
-
-            t_fa = self._run_fa_e_step(X, n_components, n_iters=3)
-            t_dfa = self._run_dfa_e_step_as_fa(X, n_components, n_iters=3)
-
-            ratio = t_dfa / t_fa
-            results.append((n_samples, n_features, n_components, t_fa, t_dfa, ratio))
-            print(f"N={n_samples}, D={n_features}, K={n_components}: "
-                  f"FA={t_fa:.4f}s, DFA={t_dfa:.4f}s, ratio={ratio:.1f}x")
-
-        # Just verify both paths produce valid results (no assertion on speed)
-        assert len(results) == len(configs)
 
     def test_kalman_f0_qi_produces_valid_stats(self):
         """Verify DFA with F=0, Q=I produces valid sufficient statistics."""
@@ -373,7 +241,7 @@ class TestNewFASubclasses:
         n_samples, n_features, n_components = 100, 10, 3
         X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
 
-        model = BayesianFactorAnalysis(n_components=n_components, n_features=n_features, key=key)
+        model = BayesianFactorAnalysis(n_components=n_components, n_features=n_features, has_ard=True, key=key)
 
         assert model.is_static
         assert model.has_ard
@@ -393,7 +261,7 @@ class TestNewFASubclasses:
         n_samples, n_features, n_components = 100, 10, 3
         X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
 
-        model = BayesianPCA(n_components=n_components, n_features=n_features, key=key)
+        model = BayesianPCA(n_components=n_components, n_features=n_features, has_ard=True, key=key)
 
         assert model.is_static
         assert model.has_ard
@@ -439,14 +307,14 @@ class TestNewFASubclasses:
         n_samples, n_features, n_components = 100, 10, 3
         X, _, _ = generate_iid_data(key, n_samples, n_features, n_components)
 
-        model = BayesianFactorAnalysis(n_components=n_components, n_features=n_features, key=key)
-        ard_alpha_before = model.ard_prior.alpha.copy()
+        model = BayesianFactorAnalysis(n_components=n_components, n_features=n_features, has_ard=True, key=key)
+        ard_alpha_before = model.ard_prior.emission.alpha.copy()
 
         params, props = model.initialize(key)
         params, _ = model.fit_em(params, props, X, key=key, num_iters=30, verbose=False)
 
         # ARD prior should have been updated
-        ard_alpha_after = model.ard_prior.alpha
+        ard_alpha_after = model.ard_prior.emission.alpha
         assert not jnp.allclose(ard_alpha_before, ard_alpha_after)
 
     def test_fa_hierarchy(self):
@@ -472,7 +340,7 @@ class TestNewFASubclasses:
 
         model = BayesianFactorAnalysis(
             n_components=n_components, n_features=n_features,
-            use_bmr=True, key=key,
+            use_bmr=True, has_ard=True, key=key,
         )
 
         assert model.use_bmr.emissions
@@ -634,8 +502,8 @@ class TestEquivalence:
         key = jr.PRNGKey(42)
         Y, _, _, _ = generate_timeseries_data(key)
 
-        from sppcax.models.factor_analysis import _make_mvnig_prior
-        emission_prior = _make_mvnig_prior(n_features=10, n_components=5, has_bias=True)
+        from sppcax.models.utils import _make_mvnig_prior
+        emission_prior = _make_mvnig_prior(n_features=10, n_components=5, input_dim=0, has_bias=True)
 
         model = BayesianDynamicFactorAnalysis(
             state_dim=5, emission_dim=10,
@@ -649,7 +517,7 @@ class TestEquivalence:
         assert elbos.shape == (29,)
         assert jnp.isfinite(elbos[-1])
         # ARD should have been updated (dnat1 gets non-zero values)
-        assert not jnp.allclose(model.ard_prior.dnat1, jnp.zeros(5))
+        assert not jnp.allclose(model.ard_prior.emission.dnat1, jnp.zeros(5))
 
 
 class TestFeatureParity:
@@ -733,18 +601,3 @@ class TestFeatureParity:
 
         assert elbos.shape == (19,)
         assert jnp.isfinite(elbos[-1])
-
-    def test_legacy_tests_still_pass(self):
-        """Verify existing test_factor_analysis tests work with deprecation."""
-        key = jr.PRNGKey(0)
-        n_samples, n_features, n_components = 100, 10, 3
-        X = jr.normal(key, (n_samples, n_features))
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            model = PFA(n_components=n_components, n_features=n_features)
-            model, lls = fit(model, X, n_iter=5, key=key)
-
-            assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
-            qz = transform(model, X)
-            assert qz.mean.shape == (n_samples, n_components)

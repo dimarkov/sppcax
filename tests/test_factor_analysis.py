@@ -1,63 +1,44 @@
-"""Tests for Factor Analysis models."""
+"""Tests for Factor Analysis models using the new BayesianFactorAnalysis API."""
 
 import jax.numpy as jnp
 import jax.random as jr
-from sppcax.distributions.delta import Delta
-from sppcax.distributions.mvn import MultivariateNormal
-from sppcax.models.factor_analysis_params import PFA, PPCA  # Updated import
-from sppcax.models.factor_analysis_algorithms import fit, transform  # Added import
+from sppcax.models.factor_analysis import BayesianFactorAnalysis, BayesianPCA
 
 
-def test_factor_analysis_array_input():  # Renamed test to reflect PFA
+def test_factor_analysis_array_input():
     """Test Factor Analysis with array input."""
     key = jr.PRNGKey(0)
     n_samples, n_features, n_components = 100, 10, 3
 
-    # Generate random data
     X = jr.normal(key, (n_samples, n_features))
 
-    # Fit model
-    model = PFA(n_components=n_components, n_features=n_features)  # Changed class name
-    model, lls = fit(model, X, n_iter=5, key=key)  # Changed to function call
+    model = BayesianFactorAnalysis(n_components=n_components, n_features=n_features, key=key)
+    params, props = model.initialize(key)
+    params, elbos = model.fit_em(params, props, X, key=key, num_iters=5, verbose=False)
 
-    # Check shapes
-    assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
-    assert model.q_w_psi.inv_gamma.mean.shape == (n_features,)  # Noise precision per feature
-    assert model.q_tau.mean.shape == (n_components,)  # ARD prior precision per component
+    assert params.emissions.weights.shape == (n_features, n_components)
+    assert jnp.isfinite(elbos[-1])
 
-    # Transform data
-    qz = transform(model, X)  # Changed to function call
+    qz = model.transform(params, X)
     assert qz.mean.shape == (n_samples, n_components)
 
 
-def test_factor_analysis_delta_input():  # Renamed test to reflect PFA
-    """Test Factor Analysis with Delta distribution input."""
+def test_factor_analysis_vbem():
+    """Test Factor Analysis with VBEM."""
     key = jr.PRNGKey(0)
     n_samples, n_features, n_components = 100, 10, 3
 
-    # Generate random data and create Delta distribution
     X = jr.normal(key, (n_samples, n_features))
-    X_dist = Delta(X)
 
-    # Fit model
-    model = PFA(
-        n_components=n_components, n_features=n_features, key=jr.PRNGKey(0)
-    )  # Changed class name and random_state->key
-    model, elbos = fit(model, X_dist, n_iter=10, key=key)  # Changed to function call
+    model = BayesianFactorAnalysis(n_components=n_components, n_features=n_features, key=key)
+    params, props = model.initialize(key, variational_bayes=True)
+    params, elbos = model.fit_vbem(params, props, X, key=key, num_iters=10, verbose=False)
 
-    # Check shapes
-    assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
-    assert model.q_w_psi.inv_gamma.mean.shape == (n_features,)  # Noise precision per feature
-    assert model.q_tau.mean.shape == (n_components,)  # ARD prior precision per component
+    assert params.emissions.weights.shape == (n_features, n_components)
+    assert jnp.isfinite(elbos[-1])
 
-    # Transform data
-    qz = transform(model, X_dist)  # Changed to function call
+    qz = model.transform(params, X)
     assert qz.mean.shape == (n_samples, n_components)
-
-    # Check ELBO increases monotonically
-    assert len(elbos) <= 10  # Should stop early if converged
-    # TODO: fix elbo convergence issues.
-    # assert jnp.all(jnp.diff(jnp.asarray(elbos)) >= -1e-6)  # ELBO should increase (allowing for numerical error)
 
 
 def test_ppca_array_input():
@@ -65,92 +46,37 @@ def test_ppca_array_input():
     key = jr.PRNGKey(0)
     n_samples, n_features, n_components = 100, 10, 3
 
-    # Generate random data
     X = jr.normal(key, (n_samples, n_features))
 
-    # Fit model
-    model = PPCA(n_components=n_components, n_features=n_features)
-    model, lls = fit(model, X, n_iter=5, key=key)  # Changed to function call
+    model = BayesianPCA(n_components=n_components, n_features=n_features, key=key)
+    params, props = model.initialize(key)
+    params, elbos = model.fit_em(params, props, X, key=key, num_iters=5, verbose=False)
 
-    # Check shapes
-    assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
-    assert model.q_w_psi.inv_gamma.mean.shape == ()  # Scalar noise precision for PPCA
-    assert model.q_tau.mean.shape == (n_components,)  # ARD prior precision per component
+    assert params.emissions.weights.shape == (n_features, n_components)
+    assert jnp.isfinite(elbos[-1])
 
-    # Transform data
-    qz = transform(model, X)  # Changed to function call
+    # Check isotropic noise
+    R = params.emissions.cov
+    R_diag = jnp.diag(R)
+    assert jnp.allclose(R_diag, R_diag[0] * jnp.ones_like(R_diag), atol=1e-5)
+
+    qz = model.transform(params, X)
     assert qz.mean.shape == (n_samples, n_components)
 
 
-def test_ppca_delta_input():
-    """Test PPCA with Delta distribution input."""
+def test_factor_analysis_transform_inverse():
+    """Test Factor Analysis transform and inverse_transform."""
     key = jr.PRNGKey(0)
     n_samples, n_features, n_components = 100, 10, 3
 
-    # Generate random data and create Delta distribution
     X = jr.normal(key, (n_samples, n_features))
-    X_dist = Delta(X)
 
-    # Fit model
-    model = PPCA(n_components=n_components, n_features=n_features, key=jr.PRNGKey(0))  # Changed random_state->key
-    model, elbos = fit(model, X_dist, n_iter=10, key=key)  # Changed to function call
+    model = BayesianFactorAnalysis(n_components=n_components, n_features=n_features, key=key)
+    params, props = model.initialize(key)
+    params, _ = model.fit_em(params, props, X, key=key, num_iters=10, verbose=False)
 
-    # Check shapes
-    assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
-    assert model.q_w_psi.inv_gamma.mean.shape == ()  # Scalar noise precision for PPCA
-    assert model.q_tau.mean.shape == (n_components,)  # ARD prior precision per component
-
-    # Transform data
-    qz = transform(model, X_dist)  # Changed to function call
+    qz = model.transform(params, X)
     assert qz.mean.shape == (n_samples, n_components)
 
-    # Check ELBO increases monotonically
-    assert len(elbos) <= 10  # Should stop early if converged
-    # TODO: fix elbos convergence issues
-    # assert jnp.all(jnp.diff(jnp.asarray(elbos)) >= -1e-6)  # ELBO should increase (allowing for numerical error)
-
-
-def test_factor_analysis_mvn_input():  # Renamed test to reflect PFA
-    """Test Factor Analysis with MVN distribution input."""
-    key = jr.PRNGKey(0)
-    n_samples, n_features, n_components = 100, 10, 3
-
-    # Generate random data and create MVN distribution
-    X = jr.normal(key, (n_samples, n_features))
-    X_dist = MultivariateNormal(loc=X, scale_tril=0.1 * jnp.eye(n_features)[None, ...].repeat(n_samples, axis=0))
-
-    # Fit model
-    model = PFA(n_components=n_components, n_features=n_features)  # Changed class name
-    model, _ = fit(model, X_dist, n_iter=5, key=key)  # Changed to function call
-
-    # Check shapes
-    assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
-    assert model.q_w_psi.inv_gamma.mean.shape == (n_features,)  # Noise precision per feature
-    assert model.q_tau.mean.shape == (n_components,)  # ARD prior precision per component
-
-    # Transform data
-    qz = transform(model, X_dist)  # Changed to function call
-    assert qz.mean.shape == (n_samples, n_components)
-
-
-def test_ppca_mvn_input():
-    """Test PPCA with MVN distribution input."""
-    key = jr.PRNGKey(0)
-    n_samples, n_features, n_components = 100, 10, 3
-
-    # Generate random data and create MVN distribution
-    X = jr.normal(key, (n_samples, n_features))
-    X_dist = MultivariateNormal(loc=X, scale_tril=0.1 * jnp.eye(n_features)[None, ...].repeat(n_samples, axis=0))
-
-    # Fit model
-    model = PPCA(n_components=n_components, n_features=n_features)
-    model, _ = fit(model, X_dist, n_iter=5, key=key)  # Changed to function call
-
-    # Check shapes
-    assert model.q_w_psi.mvn.mean.shape == (n_features, n_components)
-    assert model.q_w_psi.inv_gamma.mean.shape == ()  # Scalar noise precision for PPCA
-    assert model.q_tau.mean.shape == (n_components,)  # ARD prior precision per component
-
-    # Transform data
-    qz = transform(model, X_dist)  # Changed to function call
-    assert qz.mean.shape == (n_samples, n_components)
+    X_recon = model.inverse_transform(params, qz)
+    assert X_recon.mean.shape == (n_samples, n_features)

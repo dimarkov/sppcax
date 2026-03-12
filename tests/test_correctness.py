@@ -581,13 +581,13 @@ class TestEdgeCases:
         X, W_true, _ = generate_iid_data(key, n_samples, n_features, n_components=2)
 
         # Fit with 6 components (4 excess)
-        model = BayesianFactorAnalysis(n_components=6, n_features=n_features, key=key)
+        model = BayesianFactorAnalysis(n_components=6, n_features=n_features, has_ard=True, key=key)
         params, props = model.initialize(key)
         params, _ = model.fit_em(params, props, X, key=key, num_iters=100, verbose=False)
 
         # Check ARD prior: tau for unnecessary components should be larger
         # (higher precision = smaller variance = more shrinkage)
-        tau_mean = model.ard_prior.mean
+        tau_mean = model.ard_prior.emission.mean
         assert tau_mean.shape == (6,), f"ARD tau shape wrong: {tau_mean.shape}"
 
         # Column norms of learned weights
