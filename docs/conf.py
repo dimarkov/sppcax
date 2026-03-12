@@ -20,6 +20,19 @@ __location__ = os.path.dirname(__file__)
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 sys.path.insert(0, os.path.join(__location__, "../src"))
 
+# -- Copy example notebooks into docs ----------------------------------------
+# Copy selected notebooks from examples/ to docs/theory/examples/ so nbsphinx
+# can render them. The copies are .gitignored to avoid duplication.
+
+examples_src = os.path.join(__location__, "..", "examples")
+examples_dst = os.path.join(__location__, "theory", "examples")
+os.makedirs(examples_dst, exist_ok=True)
+for nb in ["test_px_em_fa.ipynb", "test_px_em_dfa.ipynb"]:
+    src = os.path.join(examples_src, nb)
+    dst = os.path.join(examples_dst, nb)
+    if os.path.exists(src):
+        shutil.copy2(src, dst)
+
 # -- Run sphinx-apidoc -------------------------------------------------------
 # This hack is necessary since RTD does not issue `sphinx-apidoc` before running
 # `sphinx-build -b html . _build/html`. See Issue:
@@ -73,7 +86,12 @@ extensions = [
     "sphinx.ext.mathjax",
     "sphinx.ext.napoleon",
     "sphinx_rtd_theme",
+    "nbsphinx",
 ]
+
+# nbsphinx configuration
+nbsphinx_execute = "never"  # Don't re-execute notebooks during build
+nbsphinx_allow_errors = True
 
 # Configure autodoc behavior
 autodoc_default_options = {

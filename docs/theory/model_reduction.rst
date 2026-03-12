@@ -7,9 +7,15 @@ Introduction
 
 Bayesian Model Reduction (BMR) is a generalisation of the Savage-Dickey ratio allowing an efficient
 comparison of a large number of generative models, all differing only in their specification of the
-prior distribution. In the context of our Bayesian Factor Analysis implementation, we use BMR to
-post-hoc prune parameters of the loading matrix, and removing redundant latent dimensions, providing
-an efficient approach to learning sparse representations.
+prior distribution. In the context of our Dynamic Factor Analysis implementation (and its FA/PCA
+special cases), we use BMR to post-hoc prune parameters of the loading matrix :math:`\mathbf{H}`
+and potentially the dynamics matrix :math:`\mathbf{F}`, removing redundant latent dimensions and
+providing an efficient approach to learning sparse representations.
+
+BMR is applied within the M-step pipeline **after** posterior computation and PX rotation, using the
+ARD-augmented prior (where :math:`\mathbb{E}[\tau_k]` from the previous iteration's ARD posterior
+is already incorporated into the prior precision). See :doc:`dynamic_factor_analysis` for the
+full pipeline description.
 
 This document provides the mathematical foundation for the BMR algorithm implemented in ``sppcax``.
 
@@ -54,7 +60,7 @@ Variational Approximation
 =========================
 
 For Bayesian Factor Analysis model (or PCA), we use a variational approximation :math:`q_0(\boldsymbol{\theta})` to the true posterior :math:`p(\boldsymbol{\theta}|\mathbf{y}, m_0)`. Importantly,
-we assume the same functional form for the posterior, a Multivariate Normal - Gamma distribution, which we use for the prior, (see :ref:`sec-prior-dist` for details).
+we assume the same functional form for the posterior and the prior (see :ref:`sec-prior-dist` for details).
 The variational free energy is given by:
 
 .. math::
@@ -87,135 +93,183 @@ of model :math:`m_i` as a folowing sequence
    F(m_0) &= F(m_i) + \sum_{k=1}^i \Delta F_{k:k-1} \\
    \Delta F_{k:k-1} &= \ln \int d \pmb{\theta} q_{k-1}(\theta) \frac{p(\pmb{\theta}|m_k)}{p(\pmb{\theta}|m_{k-1})}
 
-Bayesian Model Reduction for Factor Analysis
-============================================
-
-In the context of Bayesian Factor Analysis, we use BMR to prune unnecessary elements of the loading matrix :math:`\mathbf{W}`. This is achieved by setting the prior precision of selected elements to infinity, effectively forcing those elements to zero.
-
-The reduced model differs from the full model only in the priors for specific elements of the loading matrix. The loading matrix elements are governed by a Normal-Gamma prior, as
-specified in :ref:`sec-load-mat`. We will express the reduced prior of model :math:`m_i` (a prior in which additional elements of the loading
-matrix are fixed to zero) as:
-
-.. math::
-
-   p_i(\pmb{W}| \pmb{\tau}, \pmb{\psi}) &=  \prod_{k=1}^K \delta(\pmb{\tilde{w}}_k^i) \left(\frac{\tau_k}{2 \pi} \right)^{\frac{D - k - r_k^i + 1}{2}}
-   \sqrt{|\pmb{\Psi}_k^i|} \exp\left(-\frac{\tau_k}{2} \pmb{\bar{w}}_{k, i}^T \pmb{\Psi}_k^i \pmb{\bar{w}}_{k, i}\right)\\
-
-where :math:`\pmb{\bar{w}}_k^i` denotes a vector of the remaining (non-zero) elements of the kth column, :math:`\pmb{\tilde{w}}_k^i` denotes a vector
-pruned elements, :math:`r_k^i` is the number of pruned elements in kth column, and :math:`\pmb{\Psi}_k^i` is a diagonal matrix containing the remaining
-elements of the noise precision matrix.
-
-Given that the approximate posterior :math:`q_0(\pmb{\theta})` is specified as (see :ref:`sec-post-dist`)
-
-.. math::
-   q_0(\pmb{\theta}) = \prod_k \text{Gamma}(\tau_k|\alpha^\tau_k, \beta^\tau_k)\prod_d \text{Gamma}(\psi_d|\alpha^\psi_d, \beta^\psi_d) \mathcal{N}(\pmb{w}_d; \pmb{\mu}_d, \psi_d^{-1} \pmb{\Sigma}_d)
-
-(where we ignore :math:`q(\pmb{\mu})` as it plays no role in pruning) we can express the change in expected free energy :math:`\Delta F` as
-
-.. math::
-   \Delta F_i &= \ln \int d \pmb{\tau}~q_0(\pmb{\tau}) \int d \pmb{\psi} ~q_0(\pmb{\psi})
-   \int d \pmb{\pmb{W}}~q_0 (\pmb{W}| \pmb{\psi}) \prod_{k=1}^K \delta(\pmb{\tilde{w}}_{k}^i)
-   \left( \frac{\tau_k}{2 \pi}\right)^{-r_k^i/2} |\pmb{\tilde{\Psi}}_k^i|^{-1/2} \\
-   & = \ln \int d \pmb{\tau}~q_0(\pmb{\tau}) \int d \pmb{\psi} ~q_0(\pmb{\psi})
-   \prod_{d=1}^D |\pmb{\tilde{\Sigma}}_d^i|^{-1/2}
-   \exp \left( - \frac{1}{2} [\pmb{\tilde{\mu}}_d^i]^T \pmb{\tilde{P}}_d^i \pmb{\tilde{\mu}}_d^i  \right)
-   \prod_{k=1}^K \tau_k^{- r_k^i / 2}
-
-where we use tilde sign to denote a vector subset corresponding to pruned elements (of the d-th component) in the reduced model :math:`m_i` relative to the full model :math:`m_0`.
 
 Computing :math:`\Delta F`
-==========================
-We will split the computation of :math:`\Delta F_i` into several components. First, we will use the follwing relation for
-the expectation over the inverse square root of :math:`\tau_k`
+===========================
+
+In ``sppcax``, BMR is applied to both the loading matrix :math:`\tilde{\mathbf{H}}` (MVNIG posterior)
+and the dynamics matrix :math:`\tilde{\mathbf{F}}` (MVN posterior). The prior precision used in both
+cases already contains :math:`\mathbb{E}[\tau_k]` from the ARD posterior of the previous iteration,
+so no separate ARD terms appear in the :math:`\Delta F` computation.
+
+We define the following quantities for a given row with pruning mask :math:`\mathbf{g}` (1 = active, 0 = pruned):
 
 .. math::
-   c_k^i = \int d \tau_k q_0(\tau_k) \tau_k^{- r_k^i / 2} =
-   [\beta_k^\tau]^{r_k^i / 2} \frac{\Gamma(\alpha_k^\tau - r_k^i/2)}{\Gamma(\alpha_k^\tau)}
 
-We will use :math:`C_{i} = \prod_{k} c_k^i` to denote the product of corresponding factors.
+   \mathbf{G} &= \text{diag}(\mathbf{g}) \\
+   \mathbf{L}_{\text{post}} &= \text{chol}(\mathbf{G} \boldsymbol{\Lambda}_{\text{post}} \mathbf{G} + \mathbf{I}_{\text{pruned}}) \\
+   \mathbf{L}_{\text{prior}} &= \text{chol}(\mathbf{G} \boldsymbol{\Lambda}_{\text{prior}} \mathbf{G} + \mathbf{I}_{\text{pruned}}) \\
+   \tilde{\boldsymbol{\mu}}_{\text{post}} &= \mathbf{L}_{\text{post}}^\top (\mathbf{g} \odot \boldsymbol{\mu}_{\text{post}}) \\
+   \tilde{\boldsymbol{\mu}}_{\text{prior}} &= \mathbf{L}_{\text{prior}}^\top (\mathbf{g} \odot \boldsymbol{\mu}_{\text{prior}})
 
-The expectation over :math:`\pmb{\psi}` results in the following expression for :math:`\Delta F_i`
-
-.. math::
-   \Delta F_i &= \ln C_i + \sum_d \ln \int d \psi_d q_0(\psi_d) \frac{1}{\sqrt{|\pmb{\tilde{\Sigma}}_{d}^i|}} \exp \left\{ -\frac{\rho_d}{2} \pmb{\tilde{\mu}}_{di}^T \pmb{\tilde{\Sigma}}_{di}^{-1}\pmb{\tilde{\mu}}_{di} \right\} \\
-   &= \ln C_i + \sum_d \ln \frac{1}{\sqrt{|\pmb{\tilde{\Sigma}}_{di}|}}
-   \left(\frac{\beta_d^\psi}{\beta_d^\psi + \frac{1}{2} \cdot \pmb{\tilde{\mu}}_{di}^T \pmb{\tilde{\Sigma}}_{di}^{-1} \pmb{\tilde{\mu}}_{di}}\right)^{\alpha_d^\psi}
-
-Similarly, the change in variational free energy of going from model :math:`m_{i-1}` to model :math:`m_i`, which only differ in
-a single element of the loading matrix (e.g. at the position :math:`d, k^*`) is obtained as
-
-.. math::
-   \Delta F_{i:i-1} &= \Delta F_{i} - \Delta F_{i-1} \\
-   &= \ln \frac{c_{k^*}^i}{c_{k^*}^{i-1}} - \frac{1}{2}\ln \sigma_{d,k^*}^2 - \alpha_d^\psi \ln \left( \frac{\beta_d^\psi + \frac{1}{2}[\pmb{\tilde{\mu}}_d^T \pmb{\tilde{\Sigma}}_d^{-1} \pmb{\tilde{\mu}}_d]_i}{\beta_d^\psi + \frac{1}{2}[\pmb{\tilde{\mu}}_d^T \pmb{\tilde{\Sigma}}_d^{-1} \pmb{\tilde{\mu}}_d]_{i-1}}\right)
+where :math:`\boldsymbol{\Lambda}_{\text{post}}` and :math:`\boldsymbol{\Lambda}_{\text{prior}}` are the
+posterior and prior precision matrices, :math:`\boldsymbol{\mu}_{\text{post}}` and :math:`\boldsymbol{\mu}_{\text{prior}}`
+are the posterior and prior means, and :math:`\mathbf{I}_{\text{pruned}} = \mathbf{I} - \mathbf{G}` fills in the pruned
+dimensions to keep the Cholesky factorisation well-conditioned.
 
 
+MVNIG Case (Loading Matrix)
+----------------------------
 
-Gibbs sampling
-==============
-
-To determine the final sparse structure of the loading matrix, we utilize the following Gibbs sampling based
-appraoch. We assume that a prior probability of an element being pruned or not is given by :math:`\pi \sim \text{Beta}(a_0, b_0)`.
-Hence, the sparse structure matrix :math:`\Lambda` is a priory sampled as
+The loading matrix has a joint MVNIG posterior (see :ref:`sec-post-dist`):
 
 .. math::
-   \lambda_{dk} \sim \mathcal{Be}(\pi)
 
-In other words, we put a spike-and-slab prior on elements of the sparse structure matrix. If :math:`\lambda_{dk}=1` then we have
-the usual normal prior on that element, and if :math:`\lambda_{dk}=0` the prior corresponds to a delta distribution, and that element
-is forced to zero.
+   q(\tilde{\mathbf{h}}_d, \psi_d) = \mathcal{N}(\tilde{\mathbf{h}}_d \mid \boldsymbol{\mu}_d,
+   \psi_d^{-1} \boldsymbol{\Sigma}_d) \, \text{Gamma}(\psi_d \mid \alpha_d, \beta_d)
 
-To obtain posterior samples form :math:`q(\lambda_{dk})` we first utilize the indepence of :math:`\Delta F_i` computations between
-components :math:`d \in \{1, \ldots, D\}`. Thus, we can sample in parallel over :math:`\pmb{\lambda}_k` constrained on values
-of all other elements, obtained in the previous iteration step :math:`\Lambda_k^{(t-1)}=(\pmb{\lambda}_{1}^{(t-1)}, \ldots, \pmb{\lambda}_{k-1}^{(t-1)}, \pmb{\lambda}_{k+1}^{(t-1)} \ldots, \pmb{\lambda}_{K}^{(t-1)})`.
-Hence,
+The change in variational free energy for pruning a set of elements in row :math:`d` is:
 
 .. math::
-   \pmb{\lambda}_k \sim \prod_d q(\lambda_{dk}) = \prod_d \mathcal{Be}\left(\sigma\left(-\Delta F_{d}\left[\Lambda_k^{(t-1)}\right] + \ln \frac{\pi_{t-1}}{1-\pi_{t-1}}\right)\right)
 
-where :math:`\mathcal{Be}(\cdot)` denotes Bernoulli distribution, :math:`\sigma(\cdot)` logistic function, and
-:math:`\Delta F_{d}\left[\Lambda_k^{(t-1)}\right]` corresponds to the d-th component of the change in variational free energy between
-two models that differ only in element  :math:`dk` of the loading matrix. Practically, with the equation above
-we are saying that the posterior probability of :math:`q(\lambda_{dk}=1)` corresponds to
+   \Delta F_d = \ln |\mathbf{L}_{\text{post}}| - \ln |\mathbf{L}_{\text{prior}}|
+   + \alpha_d \ln \beta_d
+   - \alpha_d \ln \left(\beta_d + \tfrac{1}{2} \tilde{\boldsymbol{\mu}}_{\text{post}}^\top \tilde{\boldsymbol{\mu}}_{\text{post}}
+   - \tfrac{1}{2} \tilde{\boldsymbol{\mu}}_{\text{prior}}^\top \tilde{\boldsymbol{\mu}}_{\text{prior}} \right)
+
+The :math:`\alpha_d \ln(\cdot)` terms arise from integrating over the shared noise precision
+:math:`\psi_d` under the Gamma posterior. When the noise is isotropic (PCA), :math:`\alpha_d`
+and :math:`\beta_d` are shared across all dimensions.
+
+
+MVN Case (Dynamics Matrix)
+---------------------------
+
+The dynamics matrix has an MVN posterior without a noise precision parameter (since :math:`\mathbf{Q} = \mathbf{I}`
+is fixed):
 
 .. math::
-   q(\lambda_{dk}=1) &= \frac{p(\pmb{y}|m_{i-1})\pi}{p(\pmb{y}|m_{i-1}) \pi + p(\pmb{y}|m_{i}) (1 - \pi)} \\
-   &\approx \frac{e^{-F(m_{i - 1}) + \ln \pi }}{e^{-F(m_{i - 1}) + \ln \pi } + e^{-F(m_{i}) + \ln (1 - \pi) }} \\
-   &= \frac{1}{1 + e^{-F(m_{i}) + F(m_{i-1}) + \ln (1 - \pi) - \ln \pi }}  \\
-   &= \frac{1}{1 + e^{\Delta F_{d, i:i-1} - \ln \frac{\pi}{1-\pi}}}
 
-Simimilarly, we can generate posterior samples for :math:`q(\pi)` and infer the effective level of sparisty in
-the loading matrix by sampling :math:`\pi_t \sim q_t(\pi) = \text{Beta}(a_t, b_t)` where
+   q(\tilde{\mathbf{f}}_k) = \mathcal{N}(\tilde{\mathbf{f}}_k \mid \boldsymbol{\mu}_k, \boldsymbol{\Sigma}_k)
+
+The change in variational free energy simplifies to:
 
 .. math::
-   a_t &= a_0 + \sum_{d, k} \lambda_{dk}^{(t)} \\
-   b_t &= b_0 + \sum_{d, k} 1 - \lambda_{dk}^{(t)}
 
-The implementation of the BMR algorithm in ``sppcax`` follows these steps:
+   \Delta F_k = \ln |\mathbf{L}_{\text{post}}| - \ln |\mathbf{L}_{\text{prior}}|
+   - \tfrac{1}{2} \tilde{\boldsymbol{\mu}}_{\text{post}}^\top \tilde{\boldsymbol{\mu}}_{\text{post}}
+   + \tfrac{1}{2} \tilde{\boldsymbol{\mu}}_{\text{prior}}^\top \tilde{\boldsymbol{\mu}}_{\text{prior}}
 
-1. Sample :math:`\pi_0 \sim p(\pi)` and set :math:`\Lambda^{(0)}` to the basic constrain on the loading matrix as defined in :ref:`sec-prior-dist`.
+This is a direct quadratic form — the absence of the :math:`\alpha \ln(\beta + \cdots)` terms reflects
+the fact that there is no noise variance to integrate over.
 
-2. Iterate :math:`t \in {1, \ldots, T}`:
 
-   a. Iterate :math:`k \in \{1, \ldots, K\}`:
-       * Sample :math:`\pmb{\lambda}_k^{(t)} \sim \prod_d q_{tk}(\lambda_{dk})`.
-   b. Sample :math:`\pi_t \sim q_t(\pi)`.
+Gibbs Sampling with Indian Buffet Process Prior
+================================================
 
-3. Return posterior with pruned parameters :math:`q(\pmb{\theta}|\Lambda^{(T)})`.
+To determine the final sparse structure of the loading matrix (and dynamics matrix), we use
+Gibbs sampling with a spike-and-slab prior on the sparsity matrix :math:`\boldsymbol{\Lambda}`.
+If :math:`\lambda_{dk} = 1`, the element retains its normal prior; if :math:`\lambda_{dk} = 0`,
+the prior becomes a delta function at zero, forcing the element to vanish.
 
-If we assume for simplicity that the final sparse structure matrix :math:`\Lambda^{(T)}` corresponds to a reduced model :math:`m_i`,
-then the updated posterior is obtained as follows:
+Indian Buffet Process Prior
+----------------------------
 
-   1. :math:`q_i(\pmb{W})`  is obtained from :math:`q_0(\pmb{W})` by forcing mean and variance of corresponding elements of the loading matrix to zero.
-   2. :math:`q_i(\pmb{\psi})` is obtained using following parameter updates:
-       .. math::
-         \alpha_{d,i}^\psi &= \alpha_d^\psi \\
-         \beta_{d, i}^\psi &= \beta_d^\psi + \frac{1}{2} \cdot \pmb{\tilde{\mu}}_{di}^T \pmb{\tilde{\Sigma}}_{di}^{-1} \pmb{\tilde{\mu}}_{di}
+Each column :math:`k` of the sparsity matrix has an independent inclusion probability drawn from a
+truncated Indian Buffet Process (IBP) prior:
 
-   3.  :math:`q_i(\pmb{\tau})` is updated assume
+.. math::
 
-       .. math::
-         \alpha_{k, i}^\tau &= \alpha_k^\tau - r_k^i/2 \\
-         \beta_{k, i}^\tau &= \beta_k^\tau
+   \pi_k \sim \text{Beta}\!\left(\frac{\alpha_0}{K},\, 1\right)
+
+where :math:`\alpha_0` is a concentration parameter controlling the expected number of active features,
+and :math:`K` is the total number of latent dimensions. This prior encourages sparse representations
+while allowing the data to determine which dimensions are needed.
+
+Gibbs Sampling Procedure
+-------------------------
+
+The posterior probability of element :math:`\lambda_{dk} = 1` is:
+
+.. math::
+
+   q(\lambda_{dk} = 1) &= \frac{p(\mathbf{y}|m_{i-1})\,\pi_k}{p(\mathbf{y}|m_{i-1})\,\pi_k + p(\mathbf{y}|m_i)\,(1-\pi_k)} \\
+   &= \sigma\!\left(\Delta F_{d,\, i:i-1} + \ln \frac{\pi_k}{1 - \pi_k}\right)
+
+where :math:`\sigma(\cdot)` is the logistic function and :math:`\Delta F_{d,\, i:i-1}` is the change
+in variational free energy between two models differing only in element :math:`(d, k)`.
+
+At each Gibbs iteration :math:`t`:
+
+1. **Sample sparsity columns**: For :math:`k = 1, \ldots, K`:
+
+   .. math::
+
+      \lambda_{dk}^{(t)} \sim \text{Bernoulli}\!\left(\sigma\!\left(\Delta F_{d,\, i:i-1} + \ln \frac{\pi_k}{1 - \pi_k}\right)\right) \cdot \text{mask}_{dk}
+
+   where :math:`\text{mask}_{dk}` is the structural constraint from the model definition.
+
+2. **Update column-wise hyperparameters**:
+
+   .. math::
+
+      \alpha_k &= \frac{\alpha_0}{K} + \sum_d \lambda_{dk}^{(t)} \\
+      \beta_k &= 1 + \sum_d (1 - \lambda_{dk}^{(t)})
+
+3. **Update concentration parameter** :math:`\alpha_0` via empirical Bayes:
+
+   .. math::
+
+      \alpha_0 = \frac{-K^2}{\sum_k \left[\psi(\alpha_k) - \psi(\alpha_k + \beta_k)\right]}
+
+   where :math:`\psi(\cdot)` is the digamma function.
+
+
+Posterior Correction After Pruning
+===================================
+
+After the Gibbs sampler converges with final mask :math:`\boldsymbol{\Lambda}`, the posterior
+distributions are corrected to account for the pruned elements.
+
+MVNIG (Emissions)
+------------------
+
+For the loading matrix posterior:
+
+1. Pruned elements are set to zero in both the mean and natural parameters.
+
+2. The Inverse Gamma :math:`\beta` parameter is corrected:
+
+   .. math::
+
+      \beta_d^{\text{new}} = \beta_d + \frac{1}{2}\left(
+      -\boldsymbol{\mu}_{\text{pruned},d}^\top \boldsymbol{\Lambda}_{\text{post},d}\, \boldsymbol{\mu}_{\text{pruned},d}
+      + \boldsymbol{\mu}_{\text{pruned},d}^{0\top} \boldsymbol{\Lambda}_{\text{prior},d}\, \boldsymbol{\mu}_{\text{pruned},d}^0
+      \right)
+
+   where :math:`\boldsymbol{\mu}_{\text{pruned},d}` denotes the pruned elements of the posterior mean
+   and :math:`\boldsymbol{\mu}_{\text{pruned},d}^0` the pruned elements of the prior mean.
+
+3. The Inverse Gamma scale is optimised:
+
+   .. math::
+
+      \text{nat2}_0 = \min\!\left(\frac{\Delta\text{nat2}}{\alpha - 1},\, \frac{-1}{\alpha - 1}\right)
+
+MVN (Dynamics)
+---------------
+
+For the dynamics matrix posterior, pruned elements are set to zero via the updated mask.
+No noise precision correction is needed since :math:`\mathbf{Q} = \mathbf{I}` is fixed.
+
+
+See Also
+========
+
+For practical examples demonstrating BMR in action:
+
+- :doc:`examples/test_px_em_fa` — FA with BMR for sparse loading matrix discovery
+- :doc:`examples/test_px_em_dfa` — DFA with BMR for sparse structure discovery
 
 
 References
