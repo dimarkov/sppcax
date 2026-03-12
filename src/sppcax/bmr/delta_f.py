@@ -4,12 +4,37 @@ import jax.numpy as jnp
 from jax import lax, nn, vmap
 from jax import random as jr
 from ..distributions import MultivariateNormal as MVN, MultivariateNormalInverseGamma as MVNIG
-from ..types import Array, Matrix, PRNGKey, Scalar, Tuple, Vector
+from ..types import Matrix, PRNGKey, Scalar, Tuple, Vector
 
 
 def compute_delta_f(
-    pruned_d, lm_mean_d, lm_prec_d, ln_c=0.0, alpha_d=None, beta_d=None, prior_prec_d=None, prior_mean_d=None
-) -> Array:
+    pruned_d: Vector,
+    lm_mean_d: Vector,
+    lm_prec_d: Matrix,
+    ln_c: Scalar = 0.0,
+    alpha_d: Scalar | None = None,
+    beta_d: Scalar | None = None,
+    prior_prec_d: Matrix | None = None,
+    prior_mean_d: Vector | None = None,
+) -> Scalar:
+    """Compute the change in variational free energy from pruning loading matrix elements.
+
+    Evaluates the free energy difference when a subset of loading matrix elements
+    (indicated by pruned_d) are set to zero for a single observation dimension d.
+
+    Args:
+        pruned_d: Binary vector indicating which elements are pruned (0) or active (1).
+        lm_mean_d: Posterior mean of the loading matrix row d.
+        lm_prec_d: Posterior precision matrix for row d.
+        ln_c: Log-constant offset (default: 0.0).
+        alpha_d: InverseGamma shape parameter for row d (None for MVN-only models).
+        beta_d: InverseGamma scale parameter for row d (None for MVN-only models).
+        prior_prec_d: Prior precision matrix for row d (None if no prior correction).
+        prior_mean_d: Prior mean for row d (None if no prior correction).
+
+    Returns:
+        Scalar change in variational free energy.
+    """
     delta_f = ln_c
     G = jnp.diag(pruned_d)
     L = jnp.linalg.cholesky(G @ lm_prec_d @ G + jnp.diag(1 - pruned_d))
@@ -47,15 +72,15 @@ def gibbs_sampler_mvn(
     from setting its prior mean to zero and prior precision to infinity (effectively pruning the parameter).
 
     Args:
-        key: PRNGkey used for sampling
-        poster: Posterior Multivariate Normal distribution
-        prior: Prior Multivariate Normal distribution
-        pi: Prior probability of element being pruned out.
-        lam: Current sparisty matrix
-        delta_f: Change in the variational free energy for the rows of the current sparsity matrix
+        key: PRNG key used for sampling.
+        post: Posterior Multivariate Normal distribution.
+        pi: Prior probability of element being active (not pruned).
+        lam: Current sparsity matrix.
+        delta_f: Change in the variational free energy for the rows of the current sparsity matrix.
+        prior: Prior Multivariate Normal distribution.
 
     Returns:
-        A tuple of new delta F values for each dimension d, and a new sparsity matrix
+        A tuple of (new_delta_f, new_lam) — updated free energy changes and sparsity matrix.
     """
 
     # Extract parameters
@@ -111,15 +136,15 @@ def gibbs_sampler_mvnig(
     from setting its prior mean to zero and prior precision to infinity (effectively pruning the parameter).
 
     Args:
-        key: PRNGkey used for sampling
-        poster: Posterior MVNIG distribution
-        prior: Prior mVNIG distribution
-        pi: Prior probability of element being pruned out.
-        lam: Current sparisty matrix
-        delta_f: Change in the variational free energy for the rows of the current sparsity matrix
+        key: PRNG key used for sampling.
+        post: Posterior MVNIG distribution.
+        prior: Prior MVNIG distribution.
+        pi: Prior probability of element being active (not pruned).
+        lam: Current sparsity matrix.
+        delta_f: Change in the variational free energy for the rows of the current sparsity matrix.
 
     Returns:
-        A tuple of new delta F values for each dimension d, and a new sparsity matrix
+        A tuple of (new_delta_f, new_lam) — updated free energy changes and sparsity matrix.
     """
 
     # Extract parameters

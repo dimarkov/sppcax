@@ -29,7 +29,7 @@ class Beta(ExponentialFamily):
     dnat2: Array  # Change in the second natural parameter (β-1)
     natural_param_shape: ClassVar[Shape] = (2,)  # [η₁, η₂]
 
-    def __init__(self, alpha0: Array = 1.0, beta0: Array = 1.0):
+    def __init__(self, alpha0: float | Array = 1.0, beta0: float | Array = 1.0):
         """Initialize beta distribution with alpha and beta parameters.
 
         Args:
@@ -54,10 +54,12 @@ class Beta(ExponentialFamily):
 
     @property
     def nat1(self) -> Array:
+        """First natural parameter η₁ = α - 1."""
         return self.nat1_0 + self.dnat1
 
     @property
     def nat2(self) -> Array:
+        """Second natural parameter η₂ = β - 1."""
         return self.nat2_0 + self.dnat2
 
     @property

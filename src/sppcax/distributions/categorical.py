@@ -38,7 +38,7 @@ class Categorical(ExponentialFamily):
         """Create Categorical from natural parameters.
 
         Args:
-            logits: Log-odds relative to last category.
+            eta: Log-odds relative to last category.
                 Shape (..., K-1) where K is number of categories.
 
         Returns:

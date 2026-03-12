@@ -29,12 +29,12 @@ class Gamma(ExponentialFamily):
     dnat2: Array  # Change in the second natural parameter (-β)
     natural_param_shape: ClassVar[Shape] = (2,)  # [η₁, η₂]
 
-    def __init__(self, alpha0: Array = 1.0, beta0: Array = 1.0):
-        """Initialize gamma distribution with alpha (shape) and beta (rate) parameters.
+    def __init__(self, alpha0: float | Array = 1.0, beta0: float | Array = 1.0):
+        """Initialize gamma distribution with shape and rate parameters.
 
         Args:
-            alpha: Shape parameter α (default: 1.0)
-            beta: Rate parameter β (default: 1.0)
+            alpha0: Shape parameter α (default: 1.0)
+            beta0: Rate parameter β (default: 1.0)
         """
         # Convert to arrays
         shape = jnp.asarray(alpha0)
@@ -54,10 +54,12 @@ class Gamma(ExponentialFamily):
 
     @property
     def nat1(self) -> Array:
+        """First natural parameter η₁ = α - 1."""
         return self.nat1_0 + self.dnat1
 
     @property
     def nat2(self) -> Array:
+        """Second natural parameter η₂ = -β."""
         return self.nat2_0 + self.dnat2
 
     @property
@@ -72,6 +74,7 @@ class Gamma(ExponentialFamily):
 
     @property
     def mean(self) -> Array:
+        """Get mean E[x] = α/β."""
         return self.alpha / self.beta
 
     @property
@@ -198,7 +201,7 @@ class Gamma(ExponentialFamily):
 class InverseGamma(ExponentialFamily):
     """Inverse Gamma distribution in natural parameters.
 
-    The gamma distribution has density:
+    The inverse gamma distribution has density:
     p(x|α,β) = β^α * x^(-α-1) * exp(-β/x) / Γ(α)
 
     In exponential family form:
@@ -208,18 +211,18 @@ class InverseGamma(ExponentialFamily):
     A(η) = log(Γ(-η₁ - 1)) + (η₁ + 1)*log(-η₂)
     """
 
-    nat1_0: Array  # prior value of the first naural parameter (-α0 - 1)
+    nat1_0: Array  # prior value of the first natural parameter (-α0 - 1)
     nat2_0: Array  # prior value of the second natural parameter (-β0)
     dnat1: Array  # Change in the first natural parameter (-α-1)
     dnat2: Array  # Change in the second natural parameter (-β)
     natural_param_shape: ClassVar[Shape] = (2,)  # [η₁, η₂]
 
-    def __init__(self, alpha0: Array = 1.0, beta0: Array = 1.0):
-        """Initialize gamma distribution with alpha (shape) and beta (scale) parameters.
+    def __init__(self, alpha0: float | Array = 1.0, beta0: float | Array = 1.0):
+        """Initialize inverse gamma distribution with shape and scale parameters.
 
         Args:
-            alpha: Shape parameter α (default: 1.0)
-            beta: Scale parameter β (default: 1.0)
+            alpha0: Shape parameter α (default: 1.0)
+            beta0: Scale parameter β (default: 1.0)
         """
         # Convert to arrays
         shape = jnp.asarray(alpha0)
@@ -239,10 +242,12 @@ class InverseGamma(ExponentialFamily):
 
     @property
     def nat1(self) -> Array:
+        """First natural parameter η₁ = -α - 1."""
         return self.nat1_0 + self.dnat1
 
     @property
     def nat2(self) -> Array:
+        """Second natural parameter η₂ = -β."""
         return self.nat2_0 + self.dnat2
 
     @property
@@ -252,11 +257,12 @@ class InverseGamma(ExponentialFamily):
 
     @property
     def beta(self) -> Array:
-        """Get rate parameter β."""
+        """Get scale parameter β."""
         return -self.nat2
 
     @property
     def mean(self) -> Array:
+        """Get mean E[x] = β/(α-1)."""
         return self.beta / (self.alpha - 1)
 
     @property
@@ -277,14 +283,14 @@ class InverseGamma(ExponentialFamily):
                Shape: batch_shape + event_shape
 
         Returns:
-            Sufficient statistics [log(x), x] with shape:
+            Sufficient statistics [log(x), 1/x] with shape:
             batch_shape + (2,)
         """
         return jnp.stack([jnp.log(x), 1 / x], axis=-1)
 
     @property
     def expected_sufficient_statistics(self) -> Array:
-        """Compute E[T(x)] = [ψ(α) - log(β), α/β].
+        """Compute E[T(x)] = [log(β) - ψ(α), α/β].
 
         Returns:
             Expected sufficient statistics [E[log(x)], E[1/x]] with shape:
@@ -292,7 +298,7 @@ class InverseGamma(ExponentialFamily):
         """
         alpha = self.alpha
         beta = self.beta
-        return jnp.stack([jnp.log(beta) - jsp.digamma(alpha), alpha / beta], axis=-1)  # E[log(x)]  # E[x]
+        return jnp.stack([jnp.log(beta) - jsp.digamma(alpha), alpha / beta], axis=-1)
 
     @property
     def log_normalizer(self) -> Array:
@@ -343,15 +349,15 @@ class InverseGamma(ExponentialFamily):
         return self.beta / jr.gamma(key, self.alpha, shape=shape)
 
     @classmethod
-    def from_natural_parameters(cls, eta: Array) -> "Gamma":
-        """Create gamma distribution from natural parameters.
+    def from_natural_parameters(cls, eta: Array) -> "InverseGamma":
+        """Create inverse gamma distribution from natural parameters.
 
         Args:
             eta: Natural parameters [η₁, η₂] with shape:
                 batch_shape + (2,)
 
         Returns:
-            Gamma distribution.
+            InverseGamma distribution.
         """
         shape = -(eta[..., 0] + 1.0)  # α = - (η₁ + 1)
         rate = -eta[..., 1]  # β = -η₂

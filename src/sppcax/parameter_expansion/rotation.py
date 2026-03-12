@@ -5,6 +5,8 @@ convergence of variational inference by exploiting the non-identifiability
 of latent factor models.
 """
 
+from typing import Tuple
+
 import jax
 import jax.numpy as jnp
 import equinox as eqx
@@ -16,6 +18,7 @@ from dynamax.utils.distributions import NormalInverseWishart
 from sppcax.distributions import MultivariateNormal
 from sppcax.distributions.mvn_gamma import MultivariateNormalInverseGamma
 from sppcax.distributions.utils import cho_inv
+from sppcax.types import Matrix, Scalar
 
 
 def _px_rotation_loss(
@@ -27,8 +30,8 @@ def _px_rotation_loss(
     initial_posterior,
     stats,
     state_dim,
-    is_static,
-):
+    is_static: bool,
+) -> Scalar:
     r"""Compute E_q[-ln p(H̃, F̃, x̃)] w.r.t. rotation R.
 
     R_block = blkdiag(R, I) is applied on the right of H (and on F columns),
@@ -109,16 +112,28 @@ def compute_px_rotation_numerical(
     stats,
     state_dim,
     is_static,
-    n_steps=32,
-    lr=1e-3,
-):
+    n_steps: int = 32,
+    lr: float = 1e-3,
+) -> Tuple[Matrix, Matrix]:
     """Find PX-VB rotation R by numerically minimizing E_q[-ln p(H̃, F̃, x̃)].
 
     Uses gradient descent with Anderson acceleration (m=1).
     Falls back to identity if the optimization does not reduce the loss.
 
+    Args:
+        emission_posterior: Posterior distribution over emission parameters.
+        emission_prior: Prior distribution over emission parameters.
+        dynamics_posterior: Posterior distribution over dynamics parameters.
+        dynamics_prior: Prior distribution over dynamics parameters.
+        initial_posterior: Posterior distribution over initial state.
+        stats: Sufficient statistics (init_stats, dynamics_stats, emission_stats).
+        state_dim: Dimension of the latent state.
+        is_static: If True, skip dynamics-related terms (FA/PCA mode).
+        n_steps: Number of gradient descent steps.
+        lr: Learning rate.
+
     Returns:
-        (R, R_inv) both of shape (K, K).
+        Tuple of (R, R_inv) rotation matrices, both of shape (K, K).
     """
     K = state_dim
 
@@ -170,7 +185,7 @@ def compute_px_rotation_numerical(
 
 
 @dispatch(MultivariateNormalInverseGamma, object, object, int)
-def rotate_distribution(dist, R, R_inv, state_dim):
+def rotate_distribution(dist, R, R_inv, state_dim) -> MultivariateNormalInverseGamma:
     """Rotate MVNIG emission posterior: H -> H @ R.
 
     Transforms the MVN component's natural parameters so that the mean
@@ -198,7 +213,7 @@ def rotate_distribution(dist, R, R_inv, state_dim):
 
 
 @dispatch(MultivariateNormal, object, object, int)
-def rotate_distribution(dist, R, R_inv, state_dim):  # noqa: F811
+def rotate_distribution(dist, R, R_inv, state_dim) -> MultivariateNormal:  # noqa: F811
     """Rotate MVN dynamics posterior: F -> R_inv @ F @ R.
 
     The left-multiply by R_inv mixes rows, so the per-row covariance becomes
@@ -224,7 +239,7 @@ def rotate_distribution(dist, R, R_inv, state_dim):  # noqa: F811
 
 
 @dispatch(NormalInverseWishart, object, object, int)
-def rotate_distribution(dist, R, R_inv, state_dim):  # noqa: F811
+def rotate_distribution(dist, R, R_inv, state_dim) -> NormalInverseWishart:  # noqa: F811
     """Rotate NIW initial posterior: mu -> R_inv @ mu, Sigma -> R_inv @ Sigma @ R_inv^T."""
     new_loc = R_inv @ dist.loc
     new_scale = R_inv @ dist.scale @ R_inv.T

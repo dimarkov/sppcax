@@ -22,8 +22,15 @@ from sppcax.distributions.delta import Delta
 from sppcax.metrics.kl_divergence import multidigamma, digamma
 
 
-def _to_distribution(X):
-    """Convert input to a Distribution if it isn't already."""
+def _to_distribution(X: object) -> Distribution:
+    """Convert input to a Distribution if it isn't already.
+
+    Args:
+        X: A Distribution instance or an array to wrap in a Delta distribution.
+
+    Returns:
+        The input unchanged if already a Distribution, otherwise Delta(X).
+    """
     if isinstance(X, Distribution):
         return X
     return Delta(X)
@@ -90,6 +97,7 @@ def posterior_update(dist, stats, props):  # noqa: F811
 
 # -- get_mode --
 
+
 @dispatch(MultivariateNormal)
 def get_mode(dist):
     """Mode of MVN distribution (Q=I fixed)."""
@@ -118,6 +126,7 @@ def get_mode(dist):  # noqa: F811
 
 # -- get_sample --
 
+
 @dispatch(MultivariateNormal, object)
 def get_sample(dist, key):
     """Sample from MVN distribution (Q=I fixed)."""
@@ -145,6 +154,7 @@ def get_sample(dist, key):  # noqa: F811
 
 
 # -- get_moments --
+
 
 @dispatch(NormalInverseWishart)
 def get_moments(dist):
@@ -178,6 +188,7 @@ def get_moments(dist):  # noqa: F811
 
 # -- get_ll_correction --
 
+
 @dispatch(MatrixNormalInverseWishart)
 def get_ll_correction(dist):
     """Log-likelihood correction for MNIW distribution."""
@@ -200,6 +211,7 @@ def get_ll_correction(dist):  # noqa: F811
 
 
 # -- get_correction --
+
 
 @dispatch(MatrixNormalInverseWishart)
 def get_correction(dist):

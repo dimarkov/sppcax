@@ -35,7 +35,7 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
         self,
         loc: Array,
         *,
-        isotropic_noise,
+        isotropic_noise: bool,
         mask: Optional[Array] = None,
         alpha0: float = 2.0,
         beta0: float = 1.0,
@@ -43,16 +43,18 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
         covariance: Optional[Array] = None,
         precision: Optional[Array] = None,
     ):
-        """Initialize MultivariateNormalGamma distribution.
+        """Initialize MultivariateNormalInverseGamma distribution.
 
         Args:
-            loc: Location parameter
-            mask: Optional boolean mask for active dimensions
-            alpha: Shape parameter for Gamma prior
-            beta: Rate parameter for Gamma prior
-            scale_tril: Optional scale matrix (lower triangular)
-            covariance: Optional covariance matrix
-            precision: Optional precision matrix
+            loc: Location parameter with shape (batch_dim, event_dim).
+            isotropic_noise: If True, use a single shared InverseGamma (scalar batch).
+                If False, use per-row InverseGamma (one per batch dimension).
+            mask: Optional boolean mask for active dimensions.
+            alpha0: Shape parameter for InverseGamma prior (default: 2.0).
+            beta0: Scale parameter for InverseGamma prior (default: 1.0).
+            scale_tril: Optional lower triangular scale matrix.
+            covariance: Optional covariance matrix.
+            precision: Optional precision matrix.
 
         Note:
             Only one of scale_tril, covariance, or precision should be provided.
@@ -124,7 +126,7 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
 
         return sig_sqr * jnp.eye(value.shape[-2]), value
 
-    def mode(self):
+    def mode(self) -> Tuple[Array, Array]:
         r"""Solve for the mode. Recall,
         ..math::
             p(\mu, \sigma^2) \propto
@@ -145,14 +147,17 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
 
     @property
     def alpha(self) -> Array:
+        """Shape parameter α of the InverseGamma component."""
         return self.inv_gamma.alpha
 
     @property
     def beta(self) -> Array:
+        """Scale parameter β of the InverseGamma component."""
         return self.inv_gamma.beta
 
     @property
     def precision(self) -> Array:
+        """Base precision matrix Λ of the MVN component."""
         return self.mvn.precision
 
     @property
@@ -162,11 +167,12 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
 
     @property
     def col_covariance(self) -> Array:
+        """Column covariance Λ⁻¹ (MVN component covariance without noise scaling)."""
         return self.mvn.covariance
 
     @property
     def expected_covariance(self) -> Array:
-        # mean of the inverse of precision (variance)
+        """Expected covariance E[σ²] * Λ⁻¹."""
         exp_variance = jnp.broadcast_to(self.inv_gamma.mean, self.batch_shape)
         return self.mvn.covariance * exp_variance[..., None, None]
 
@@ -188,11 +194,18 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
         return jnp.broadcast_to(suff_stats, self.batch_shape + (2,))
 
 
-def mvnig_posterior_update(mvnig_prior: MultivariateNormalInverseGamma, sufficient_stats: tuple, props: dict):
-    """Update the multivaraite normal inverse gamma (MVNIG) distribution using sufficient statistics
+def mvnig_posterior_update(
+    mvnig_prior: MultivariateNormalInverseGamma, sufficient_stats: tuple, props: object
+) -> MultivariateNormalInverseGamma:
+    """Update the multivariate normal inverse gamma (MVNIG) posterior from sufficient statistics.
+
+    Args:
+        mvnig_prior: Prior MVNIG distribution.
+        sufficient_stats: Tuple of (SxxT, SxyT, SyyT, N) sufficient statistics.
+        props: Parameter properties controlling which parameters are trainable.
 
     Returns:
-        posterior MVNIG distribution
+        Posterior MVNIG distribution.
     """
     # extract parameters of the prior distribution
     mvn_prior = mvnig_prior.mvn

@@ -65,12 +65,16 @@ class ParamsLGSSM(NamedTuple):
 
 
 class ParamsBMR(NamedTuple):
+    """Flags controlling which parameter groups undergo Bayesian Model Reduction."""
+
     initial: bool
     dynamics: bool
     emissions: bool
 
 
 class ARDDist(NamedTuple):
+    """ARD (Automatic Relevance Determination) Gamma priors over weight columns."""
+
     emission: Gamma
     dynamics: Gamma
 
@@ -528,7 +532,9 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         )
 
     @staticmethod
-    def _compute_ard_updates(emission_posterior: MultivariateNormalInverseGamma, state_dim: int):
+    def _compute_ard_updates(
+        emission_posterior: MultivariateNormalInverseGamma, state_dim: int
+    ) -> Tuple[Vector, Vector]:
         """Compute ARD natural parameter updates from emission posterior.
 
         Returns (dnat1_tau, dnat2_tau) to be applied to the ARD prior outside JIT.
@@ -546,7 +552,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         return dnat1_tau, dnat2_tau
 
     @staticmethod
-    def _compute_dynamics_ard_updates(dynamics_posterior: MultivariateNormal, state_dim: int):
+    def _compute_dynamics_ard_updates(dynamics_posterior: MultivariateNormal, state_dim: int) -> Tuple[Vector, Vector]:
         """Compute ARD natural parameter updates from dynamics posterior (MVN).
 
         For MVN dynamics with fixed Q=I, there is no per-row noise scaling.
@@ -564,7 +570,9 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         return dnat1_tau, dnat2_tau
 
     @staticmethod
-    def _apply_ard_to_emission_prior(emission_prior, m_step_state):
+    def _apply_ard_to_emission_prior(
+        emission_prior: MultivariateNormalInverseGamma, m_step_state: Gamma
+    ) -> MultivariateNormalInverseGamma:
         """Modify emission prior precision by incorporating ARD tau from previous iteration.
 
         Reconstructs the ARD posterior from m_step_state, computes E[tau], and adds it
@@ -572,7 +580,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         Only nat2 is modified — ARD is a zero-centered shrinkage prior.
 
         Returns:
-            Tuple of (modified_prior, ard_dist).
+            Modified emission prior with ARD-adjusted precision.
         """
         ard_dist = m_step_state
         E_tau = ard_dist.mean  # (K,)
@@ -588,7 +596,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         return modified_prior
 
     @staticmethod
-    def _apply_ard_to_dynamics_prior(dynamics_prior, m_step_state):
+    def _apply_ard_to_dynamics_prior(dynamics_prior: MultivariateNormal, m_step_state: Gamma) -> MultivariateNormal:
         """Modify dynamics MVN prior precision by incorporating ARD tau.
 
         Sets the first K×K block of the per-row precision to diag(E[tau]).

@@ -15,23 +15,30 @@ def symmetrize(matrix: Matrix) -> Matrix:
 
 @jit
 def cho_inv(matrix: Matrix, diagonal_boost: float = 1e-12) -> Matrix:
-    """Inversion of a positive-definite matrix"""
+    """Invert a positive-definite matrix via Cholesky decomposition.
+
+    Args:
+        matrix: Positive-definite matrix with shape (..., d, d).
+        diagonal_boost: Small value added to diagonal for numerical stability.
+
+    Returns:
+        Inverse matrix with same shape.
+    """
     identity = jnp.eye(matrix.shape[-1], dtype=matrix.dtype)
     chol = cho_factor(symmetrize(matrix) + diagonal_boost * identity, lower=True)
     return cho_solve(chol, jnp.broadcast_to(identity, matrix.shape))
 
 
 @jit
-def safe_cholesky(X: Array, jitter: float = 1e-12) -> tuple[Array, Scalar]:
-    """Compute Cholesky decomposition and log determinant with added diagonal jitter.
+def safe_cholesky(X: Array, jitter: float = 1e-12) -> Array:
+    """Compute Cholesky decomposition with added diagonal jitter for numerical stability.
 
     Args:
         X: Symmetric positive definite matrix.
         jitter: Small positive value to add to diagonal for stability.
 
     Returns:
-        Tuple of (L, logdet) where L is the lower triangular Cholesky factor
-        and logdet is the log determinant of X.
+        Lower triangular Cholesky factor L such that X ≈ L @ L^T.
     """
     n = X.shape[-1]
     X = X + jitter * jnp.eye(n)

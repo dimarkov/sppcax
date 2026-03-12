@@ -9,6 +9,14 @@ from .base import Distribution
 
 
 def default_ss(x: Array) -> Array:
+    """Compute default sufficient statistics [x, vec(xx^T)] for MVN.
+
+    Args:
+        x: Input vector with shape (..., d).
+
+    Returns:
+        Concatenation of x and vectorized outer product with shape (..., d + d*d).
+    """
     return jnp.concatenate([x, (x[..., None] * x[..., None, :]).reshape(*x.shape[:-1], -1)], axis=-1)
 
 
@@ -54,6 +62,7 @@ class Delta(Distribution):
 
     @property
     def covariance(self) -> Array:
+        """Covariance matrix (always zero for delta distribution)."""
         zeros = jnp.zeros(self.shape)
         return zeros[..., None] * jnp.eye(zeros.shape[-1])
 

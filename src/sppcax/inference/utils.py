@@ -41,8 +41,17 @@ class ParamsLGSSMVB(NamedTuple):
 
 
 # Helper functions
-def _get_params(params, num_timesteps, t):
-    """Helper function to get all parameters at time t."""
+def _get_params(params: ParamsLGSSMVB, num_timesteps: int, t: int) -> tuple:
+    """Get all LGSSM parameters at time index t.
+
+    Args:
+        params: Model parameters (may be time-varying).
+        num_timesteps: Total number of time steps.
+        t: Current time index.
+
+    Returns:
+        Tuple of (F, B, b, Q, Cx, H, D, d, R, Cy).
+    """
     assert not callable(params.emissions.cov), "Emission covariance cannot be a callable."
 
     F = _get_one_param(params.dynamics.weights, 2, t)

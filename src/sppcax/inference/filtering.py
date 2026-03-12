@@ -18,7 +18,16 @@ from dynamax.linear_gaussian_ssm.inference import PosteriorGSSMFiltered, _predic
 from .utils import _get_params, ParamsLGSSMVB, preprocess_args
 
 
-def _slogdet_lu(lu: Array, pivot: Array) -> tuple[Array, Array]:
+def _slogdet_lu(lu: Array, pivot: Array) -> Array:
+    """Compute log absolute determinant from an LU factorization.
+
+    Args:
+        lu: LU-factored matrix from lu_factor.
+        pivot: Pivot indices from lu_factor.
+
+    Returns:
+        Log absolute determinant. Returns -inf if the matrix is singular.
+    """
     dtype = lax.dtype(lu)
     diag = jnp.diagonal(lu, axis1=-2, axis2=-1)
     is_zero = jnp.any(diag == jnp.array(0, dtype=dtype), axis=-1)
@@ -28,7 +37,29 @@ def _slogdet_lu(lu: Array, pivot: Array) -> tuple[Array, Array]:
     return logdet
 
 
-def correct_for_vb(mean, cov, u, C, dim) -> tuple[Array, Array]:
+def correct_for_vb(
+    mean: Float[Array, " state_dim"],  # noqa F772
+    cov: Float[Array, "state_dim state_dim"],  # noqa F772
+    u: Float[Array, " input_dim"],  # noqa F772
+    C: Float[Array, "aug_dim aug_dim"],  # noqa F772
+    dim: int,
+) -> tuple[Array, Array, Array]:
+    """Correct predicted mean and covariance for variational Bayes uncertainty.
+
+    Accounts for the posterior uncertainty in model parameters (H or F) by
+    adjusting the predicted state distribution and computing a log-likelihood
+    correction term.
+
+    Args:
+        mean: Predicted (or filtered) state mean.
+        cov: Predicted (or filtered) state covariance.
+        u: Input vector at current time step.
+        C: Correction matrix from parameter uncertainty (sum of per-feature corrections).
+        dim: State dimension.
+
+    Returns:
+        Tuple of (corrected_mean, corrected_cov, ll_correction).
+    """
     _C = jnp.eye(dim) + cov @ C[:dim, :dim]
     lup = lu_factor(_C)
 

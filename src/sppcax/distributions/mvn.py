@@ -101,9 +101,11 @@ class MultivariateNormal(ExponentialFamily):
 
         Args:
             x: Matrix with shape (..., d, d)
+            zeromask: If True, set masked entries to 0. If False (default),
+                set masked entries to identity matrix values.
 
         Returns:
-            Masked matrix with same shape
+            Masked matrix with same shape.
         """
         mask_mat = self.mask[..., None] * self.mask[..., None, :]
 
