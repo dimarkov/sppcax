@@ -8,14 +8,12 @@ so the Kalman smoother runs trivially (one filter step, no scan per batch)
 and vmap over batches handles parallelism.
 """
 
-from typing import Optional, Tuple, Union
+from typing import Optional
 
 import jax.numpy as jnp
-import jax.random as jr
 from dynamax.utils.distributions import NormalInverseWishart as NIW
 
-from sppcax.distributions.mvn_gamma import MultivariateNormalInverseGamma
-from sppcax.types import Array, Matrix, PRNGKey
+from sppcax.types import PRNGKey
 from sppcax.models.dynamic_factor_analysis import BayesianDynamicFactorAnalysis
 from sppcax.models.utils import _make_mvnig_prior
 
@@ -54,6 +52,7 @@ class BayesianFactorAnalysis(BayesianDynamicFactorAnalysis):
         has_emissions_bias: bool = True,
         has_ard: bool = True,
         use_bmr: bool = False,
+        use_px: bool = True,
         isotropic_noise: bool = False,
         key: Optional[PRNGKey] = None,
         **kw_priors,
@@ -61,8 +60,12 @@ class BayesianFactorAnalysis(BayesianDynamicFactorAnalysis):
         # Create MVNIG emission prior if not provided
         if "emission_prior" not in kw_priors:
             kw_priors["emission_prior"] = _make_mvnig_prior(
-                n_features, n_components, input_dim, has_bias=has_emissions_bias,
-                isotropic_noise=isotropic_noise, key=key,
+                n_features,
+                n_components,
+                input_dim,
+                has_bias=has_emissions_bias,
+                isotropic_noise=isotropic_noise,
+                key=key,
             )
 
         # Initial prior with mode (m=0, S=I) for z ~ N(0, I).
@@ -74,7 +77,7 @@ class BayesianFactorAnalysis(BayesianDynamicFactorAnalysis):
                 loc=jnp.zeros(n_components),
                 mean_concentration=1.0,
                 df=df,
-                scale=(df + n_components + 2) * jnp.eye(n_components),
+                scale=df * jnp.eye(n_components),
             )
 
         super().__init__(
@@ -85,9 +88,9 @@ class BayesianFactorAnalysis(BayesianDynamicFactorAnalysis):
             has_emissions_bias=has_emissions_bias,
             is_static=True,
             has_ard=has_ard,
-            has_sparsity_prior=use_bmr,
             isotropic_noise=isotropic_noise,
             use_bmr=use_bmr,
+            use_px=use_px,
             **kw_priors,
         )
 

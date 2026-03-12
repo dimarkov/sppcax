@@ -1,23 +1,13 @@
 """Model classes."""
 
-from .factor_analysis_algorithms import compute_elbo, e_step, fit, inverse_transform, m_step, transform
-from .factor_analysis_params import PFA, PPCA
 from .factor_analysis import BayesianFactorAnalysis, BayesianPCA
 from .dynamic_factor_analysis import BayesianDynamicFactorAnalysis
 
 # from .mixed_likelihood_vbpca import MixedLikelihoodVBPCA
 
 __all__ = [
-    "PPCA",
-    "PFA",
     "BayesianFactorAnalysis",
     "BayesianPCA",
     "BayesianDynamicFactorAnalysis",
     # "MixedLikelihoodVBPCA",
-    "e_step",
-    "m_step",
-    "fit",
-    "transform",
-    "inverse_transform",
-    "compute_elbo",
 ]

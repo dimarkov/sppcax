@@ -99,7 +99,6 @@ def kl_divergence(q: MVNIG, p: MVNIG) -> float:
 
 @dispatch(MVN, MVN)
 def kl_divergence(q: MVN, p: MVN) -> float:
-
     diff = p.mean - q.mean
     n, k = diff.shape
 
@@ -115,6 +114,6 @@ def kl_divergence(q: MVN, p: MVN) -> float:
     )
 
     # todo: find a better way to compute logdet if covariance has zero diagonal values due to masking
-    kl_div -= 0.5 * (jnp.linalg.slogdet(P_p)[1] + jnp.linalg.slogdet(q.precision)[1]).sum()
+    kl_div -= 0.5 * (jnp.linalg.slogdet(P_p)[1] - jnp.linalg.slogdet(q.precision)[1]).sum()
 
     return kl_div

@@ -23,9 +23,7 @@ def _make_mvnig_prior(n_features, n_components, input_dim, has_bias=True, isotro
     mask = jnp.clip(jnp.arange(n_features), max=n_components)[..., None] >= jnp.arange(n_components)
     mask = jnp.pad(mask, [(0, 0), (0, int(has_bias) + input_dim)], constant_values=1)
 
-    return MultivariateNormalInverseGamma(
-        loc=loc, mask=mask, alpha0=2.0, beta0=1.0, isotropic_noise=isotropic_noise
-    )
+    return MultivariateNormalInverseGamma(loc=loc, mask=mask, alpha0=2.0, beta0=1.0, isotropic_noise=isotropic_noise)
 
 
 def _make_mvn_prior(state_dim, input_dim, has_bias=True, key=None):
@@ -38,8 +36,8 @@ def _make_mvn_prior(state_dim, input_dim, has_bias=True, key=None):
     """
 
     dim = state_dim + input_dim + has_bias  # columns: [F, U, b] or just [F, U]
-    loc = jnp.pad(jnp.eye(state_dim), [(0, 0), (0, int(has_bias) + input_dim)])
+    loc = jnp.zeros((state_dim, dim))
     if key is not None:
         loc += jr.normal(key, (state_dim, dim)) * 0.01
- 
+
     return MultivariateNormal(loc=loc)

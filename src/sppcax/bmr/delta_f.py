@@ -6,7 +6,6 @@ from jax import random as jr
 from jax.scipy.special import gammaln
 
 from ..distributions import MultivariateNormal as MVN, MultivariateNormalInverseGamma as MVNIG
-from ..models.factor_analysis_params import PFA
 from ..types import Array, Matrix, PRNGKey, Scalar, Tuple, Vector
 
 
@@ -26,11 +25,11 @@ def compute_delta_f(
 
     if alpha_d is not None and beta_d is not None:
         delta_f += alpha_d * jnp.log(beta_d)
-    
+
     tmp = jnp.inner(tilde_mu, tilde_mu) / 2
     if beta_d is not None:
         tmp += beta_d
-    
+
     if prior_prec_d is not None:
         L = jnp.linalg.cholesky(G @ prior_prec_d @ G + jnp.diag(1 - pruned_d))
         tilde_mu = L.mT @ (pruned_d * prior_mean_d)
@@ -74,7 +73,7 @@ def gibbs_sampler_mvn(
     if prior is not None:
         lm_prior_mean = prior.mean  # loading matrix mean
         lm_prior_prec = prior.precision  # loading matrix precision
-    
+
     eta = jnp.log(pi) - jnp.log(1 - pi)
     D, K = lam.shape
 
@@ -91,12 +90,8 @@ def gibbs_sampler_mvn(
                 prior_prec_d=lm_prior_prec,
             )
         else:
-            delta_f_d = vmap(compute_delta_f)(
-                pruned,
-                lm_mean,
-                lm_prec
-            )
-        
+            delta_f_d = vmap(compute_delta_f)(pruned, lm_mean, lm_prec)
+
         tmp = delta_f_d - delta_f
         delta_f_d_iim1 = jnp.where(lam[:, k] == 1, -tmp, tmp)
 
@@ -200,7 +195,7 @@ def gibbs_sampler_with_ard(
     lm_mean = q_w_psi.mvn.mean  # loading matrix mean
     lm_prec = q_w_psi.mvn.precision  # loading matrix precision
     eta = jnp.log(pi) - jnp.log(1 - pi)
-    
+
     # Only iterate over ARD columns (not bias/input columns)
     n_ard = len(q_tau.alpha)
 
@@ -232,8 +227,3 @@ def gibbs_sampler_with_ard(
     (new_lam, new_delta_f, _), _ = lax.scan(step_fn, init, jnp.arange(n_ard))
 
     return new_delta_f, new_lam
-
-
-def gibbs_sampler_pfa(key: PRNGKey, model: PFA, pi: Scalar, lam: Matrix, delta_f: Vector) -> Tuple[Vector, Matrix]:
-    """Legacy wrapper: Sample sparsity matrix for PFA model (delegates to gibbs_sampler_with_ard)."""
-    return gibbs_sampler_with_ard(key, model.q_w_psi, model.q_tau, pi, lam, delta_f)
