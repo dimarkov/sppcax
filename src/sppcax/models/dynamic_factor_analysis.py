@@ -28,6 +28,7 @@ from dynamax.utils.bijectors import RealToPSDBijector
 
 from sppcax.types import Array, Vector, Matrix, PRNGKey, Float
 from sppcax.distributions import Distribution, Gamma, MultivariateNormal
+from sppcax.distributions.delta import Delta
 from sppcax.distributions.mvn_gamma import MultivariateNormalInverseGamma
 from sppcax.distributions.updates import (
     _to_distribution,
@@ -103,7 +104,7 @@ def _inflate_emission_cov(params, mask):
     return result
 
 
-def _compute_masked_emission_stats(Ex, Vx, u, y, mask, state_dim, has_bias):
+def _compute_masked_emission_stats(Ex, Vx, u, y, mask, state_dim, has_bias, obs_cov=None):
     """Compute per-dimension emission sufficient statistics with observation mask.
 
     Args:
@@ -114,6 +115,8 @@ def _compute_masked_emission_stats(Ex, Vx, u, y, mask, state_dim, has_bias):
         mask: boolean mask, shape (T, D). True = observed.
         state_dim: latent state dimension K.
         has_bias: whether bias column is included in u.
+        obs_cov: optional per-timestep observation covariance, shape (T, D) for diagonal
+            or (T, D, D) for full. When Y is distributional, this is Cov(y_t).
 
     Returns:
         Emission sufficient statistics tuple (sum_zzT, sum_zyT, sum_yyT, N).
@@ -129,6 +132,12 @@ def _compute_masked_emission_stats(Ex, Vx, u, y, mask, state_dim, has_bias):
     sum_zzT = sum_zzT.at[:, :state_dim, :state_dim].add(jnp.einsum("td,tij->dij", mask_f, Vx))
     sum_zyT = jnp.einsum("ti,td->id", z, y_masked)  # (dim, D) — same shape as unmasked
     sum_yyT = jnp.einsum("td,td->d", mask_f, y * y)  # (D,) — only diag needed
+
+    # Add observation covariance: sum_t mask[t,d] * Cov(y_t)[d,d]
+    if obs_cov is not None:
+        obs_cov_diag = jnp.diagonal(obs_cov, axis1=-2, axis2=-1) if obs_cov.ndim == 3 else obs_cov
+        sum_yyT = sum_yyT + jnp.einsum("td,td->d", mask_f, obs_cov_diag)
+
     N = mask_f.sum(0)  # (D,) per-dimension count
 
     emission_stats = (sum_zzT, sum_zyT, sum_yyT, N)
@@ -791,14 +800,17 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             ]
         ] = None,
         mask: Optional[Float[Array, "num_timesteps emission_dim"]] = None,  # noqa F772
+        obs_cov: Optional[Array] = None,
     ) -> Tuple[SuffStatsLGSSM, Scalar]:
         """Compute expected sufficient statistics for the E-step of the EM algorithm.
 
         Args:
             params: model parameters.
-            emissions: sequence of observations.
+            emissions: sequence of observations (or expected observations ``<Y>``).
             inputs: optional sequence of inputs.
             mask: optional boolean mask (T, D). True = observed, False = missing.
+            obs_cov: optional per-timestep observation covariance, shape (T, D) for diagonal
+                or (T, D, D) for full. When Y is distributional, this is Cov(y_t).
 
         Returns:
             expected sufficient statistics and marginal log likelihood.
@@ -826,6 +838,15 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         if mask is not None:
             n_masked = (1.0 - mask.astype(emissions.dtype)).sum()
             ll += 0.5 * n_masked * jnp.log(2 * jnp.pi)
+
+        # ELBO correction for distributional observations: -1/2 sum_t tr(R^{-1} Sigma_t)
+        if obs_cov is not None:
+            R = params.emissions.cov
+            obs_cov_diag = jnp.diagonal(obs_cov, axis1=-2, axis2=-1) if obs_cov.ndim == 3 else obs_cov
+            if R.ndim == 1:
+                ll -= 0.5 * jnp.sum(obs_cov_diag / R)
+            else:
+                ll -= 0.5 * jnp.trace(jnp.linalg.solve(R, obs_cov.sum(0)))
 
         # shorthand
         Ex = posterior.smoothed_means
@@ -861,13 +882,18 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         # expected sufficient statistics for the emissions
         if mask is not None:
-            emission_stats = _compute_masked_emission_stats(Ex, Vx, u, y, mask, self.state_dim, self.has_emissions_bias)
+            emission_stats = _compute_masked_emission_stats(
+                Ex, Vx, u, y, mask, self.state_dim, self.has_emissions_bias, obs_cov=obs_cov
+            )
         else:
             # let z[t] = [x[t], u[t]] for t = 0...T-1
             sum_zzT = jnp.block([[Ex.T @ Ex, Ex.T @ u], [u.T @ Ex, u.T @ u]])
             sum_zzT = sum_zzT.at[: self.state_dim, : self.state_dim].add(Vx.sum(0))
             sum_zyT = jnp.block([[Ex.T @ y], [u.T @ y]])
             sum_yyT = emissions.T @ emissions
+            # Add observation covariance: sum_t Cov(y_t)
+            if obs_cov is not None:
+                sum_yyT = sum_yyT + obs_cov.sum(0)
             emission_stats = (sum_zzT, sum_zyT, sum_yyT, num_timesteps)
             if not self.has_emissions_bias:
                 emission_stats = (sum_zzT[:-1, :-1], sum_zyT[:-1, :], sum_yyT, num_timesteps)
@@ -928,14 +954,17 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             ]
         ] = None,
         mask: Optional[Float[Array, "num_timesteps emission_dim"]] = None,  # noqa F772
+        obs_cov: Optional[Array] = None,
     ) -> Tuple[SuffStatsLGSSM, Scalar]:
         """Compute expected sufficient statistics for the E-step of the EM algorithm.
 
         Args:
             params: model parameters.
-            emissions: sequence of observations.
+            emissions: sequence of observations (or expected observations ``<Y>``).
             inputs: optional sequence of inputs.
             mask: optional boolean mask (T, D). True = observed, False = missing.
+            obs_cov: optional per-timestep observation covariance, shape (T, D) for diagonal
+                or (T, D, D) for full. When Y is distributional, this is Cov(y_t).
 
         Returns:
             expected sufficient statistics and marginal log likelihood.
@@ -962,6 +991,15 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         if mask is not None:
             n_masked = (1.0 - mask.astype(emissions.dtype)).sum()
             ll += 0.5 * n_masked * jnp.log(2 * jnp.pi)
+
+        # ELBO correction for distributional observations: -1/2 sum_t tr(<R^{-1}> Sigma_t)
+        if obs_cov is not None:
+            R = params.emissions.cov
+            obs_cov_diag = jnp.diagonal(obs_cov, axis1=-2, axis2=-1) if obs_cov.ndim == 3 else obs_cov
+            if R.ndim == 1:
+                ll -= 0.5 * jnp.sum(obs_cov_diag / R)
+            else:
+                ll -= 0.5 * jnp.trace(jnp.linalg.solve(R, obs_cov.sum(0)))
 
         # shorthand
         Ex = posterior.smoothed_means
@@ -997,13 +1035,18 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         # expected sufficient statistics for the emissions
         if mask is not None:
-            emission_stats = _compute_masked_emission_stats(Ex, Vx, u, y, mask, self.state_dim, self.has_emissions_bias)
+            emission_stats = _compute_masked_emission_stats(
+                Ex, Vx, u, y, mask, self.state_dim, self.has_emissions_bias, obs_cov=obs_cov
+            )
         else:
             # let z[t] = [x[t], u[t]] for t = 0...T-1
             sum_zzT = jnp.block([[Ex.T @ Ex, Ex.T @ u], [u.T @ Ex, u.T @ u]])
             sum_zzT = sum_zzT.at[: self.state_dim, : self.state_dim].add(Vx.sum(0))
             sum_zyT = jnp.block([[Ex.T @ y], [u.T @ y]])
             sum_yyT = emissions.T @ emissions
+            # Add observation covariance: sum_t Cov(y_t)
+            if obs_cov is not None:
+                sum_yyT = sum_yyT + obs_cov.sum(0)
             emission_stats = (sum_zzT, sum_zyT, sum_yyT, num_timesteps)
             if not self.has_emissions_bias:
                 emission_stats = (sum_zzT[:-1, :-1], sum_zyT[:-1, :], sum_yyT, num_timesteps)
@@ -1066,11 +1109,18 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         Ey = Y_dist.mean if hasattr(Y, "mean") else Y_dist.location
 
+        # Extract observation covariance for distributional Y
+        obs_cov = None if isinstance(Y_dist, Delta) else Y_dist.covariance
+
         # Make sure the emissions and inputs have batch dimensions
         if self.is_static:
             # Each observation is an independent batch of T=1
             batch_emissions = Ey[:, None, :]  # (N, 1, D)
             batch_mask = mask[:, None, :] if mask is not None else None  # (N, 1, D)
+            if obs_cov is not None:
+                batch_obs_cov = obs_cov[:, None, ...]  # (N, 1, D) or (N, 1, D, D)
+            else:
+                batch_obs_cov = None
             if U_dist is not None:
                 Eu = U_dist.mean if hasattr(U, "mean") else U_dist.location
                 batch_inputs = Eu[:, None, :] if Eu.ndim == 2 else Eu
@@ -1079,6 +1129,13 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         else:
             batch_emissions = ensure_array_has_batch_dim(Ey, self.emission_shape)
             batch_mask = ensure_array_has_batch_dim(mask, self.emission_shape) if mask is not None else None
+            if obs_cov is not None:
+                # Add batch dim if obs_cov matches single-sequence shape
+                batch_obs_cov = (
+                    obs_cov[None, ...] if obs_cov.shape[0] == Ey.shape[-2] and Ey.ndim != obs_cov.ndim else obs_cov
+                )
+            else:
+                batch_obs_cov = None
             if U_dist is not None:
                 Eu = U_dist.mean if hasattr(U, "mean") else U_dist.location
                 batch_inputs = ensure_array_has_batch_dim(Eu, self.inputs_shape)
@@ -1088,10 +1145,18 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         @jit
         def em_step(params, kl_div, m_step_state, key, enable_bmr):
             """Perform one EM step."""
-            if batch_mask is not None:
-                batch_stats, lls = vmap(partial(self.e_step, params))(batch_emissions, batch_inputs, batch_mask)
+            e_step_fn = partial(self.e_step, params)
+            if batch_obs_cov is not None:
+                if batch_mask is not None:
+                    batch_stats, lls = vmap(e_step_fn)(batch_emissions, batch_inputs, batch_mask, batch_obs_cov)
+                else:
+                    batch_stats, lls = vmap(lambda e, i, oc: e_step_fn(e, i, obs_cov=oc))(
+                        batch_emissions, batch_inputs, batch_obs_cov
+                    )
+            elif batch_mask is not None:
+                batch_stats, lls = vmap(e_step_fn)(batch_emissions, batch_inputs, batch_mask)
             else:
-                batch_stats, lls = vmap(partial(self.e_step, params))(batch_emissions, batch_inputs)
+                batch_stats, lls = vmap(e_step_fn)(batch_emissions, batch_inputs)
             elbo = lls.sum() - kl_div
             params, kl_div, m_step_state = self.m_step(
                 params,
@@ -1182,10 +1247,17 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         Ey = Y_dist.mean if hasattr(Y, "mean") else Y_dist.location
 
+        # Extract observation covariance for distributional Y
+        obs_cov = None if isinstance(Y_dist, Delta) else Y_dist.covariance
+
         # Make sure the emissions and inputs have batch dimensions
         if self.is_static:
             batch_emissions = Ey[:, None, :]  # (N, 1, D)
             batch_mask = mask[:, None, :] if mask is not None else None  # (N, 1, D)
+            if obs_cov is not None:
+                batch_obs_cov = obs_cov[:, None, ...]  # (N, 1, D) or (N, 1, D, D)
+            else:
+                batch_obs_cov = None
             if U_dist is not None:
                 Eu = U_dist.mean if hasattr(U, "mean") else U_dist.location
                 batch_inputs = Eu[:, None, :] if Eu.ndim == 2 else Eu
@@ -1194,6 +1266,12 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         else:
             batch_emissions = ensure_array_has_batch_dim(Ey, self.emission_shape)
             batch_mask = ensure_array_has_batch_dim(mask, self.emission_shape) if mask is not None else None
+            if obs_cov is not None:
+                batch_obs_cov = (
+                    obs_cov[None, ...] if obs_cov.shape[0] == Ey.shape[-2] and Ey.ndim != obs_cov.ndim else obs_cov
+                )
+            else:
+                batch_obs_cov = None
             if U_dist is not None:
                 Eu = U_dist.mean if hasattr(U, "mean") else U_dist.location
                 batch_inputs = ensure_array_has_batch_dim(Eu, self.inputs_shape)
@@ -1202,10 +1280,18 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         def em_step(params, kl_div, m_step_state, key, enable_bmr):
             """Perform one EM step."""
-            if batch_mask is not None:
-                batch_stats, lls = vmap(partial(self.vbe_step, params))(batch_emissions, batch_inputs, batch_mask)
+            e_step_fn = partial(self.vbe_step, params)
+            if batch_obs_cov is not None:
+                if batch_mask is not None:
+                    batch_stats, lls = vmap(e_step_fn)(batch_emissions, batch_inputs, batch_mask, batch_obs_cov)
+                else:
+                    batch_stats, lls = vmap(lambda e, i, oc: e_step_fn(e, i, obs_cov=oc))(
+                        batch_emissions, batch_inputs, batch_obs_cov
+                    )
+            elif batch_mask is not None:
+                batch_stats, lls = vmap(e_step_fn)(batch_emissions, batch_inputs, batch_mask)
             else:
-                batch_stats, lls = vmap(partial(self.vbe_step, params))(batch_emissions, batch_inputs)
+                batch_stats, lls = vmap(e_step_fn)(batch_emissions, batch_inputs)
             elbo = -kl_div + lls.sum()
             params, kl_div, m_step_state = self.vbm_step(
                 params,
@@ -1256,6 +1342,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         emissions: Float[Array, "nbatch num_timesteps emission_dim"],  # noqa: F722
         inputs: Optional[Float[Array, "nbatch num_timesteps input_dim"]] = None,  # noqa: F722
         mask: Optional[Float[Array, "nbatch num_timesteps emission_dim"]] = None,  # noqa: F722
+        obs_cov: Optional[Array] = None,
         verbose: bool = False,
         burn_in: int = 0,
         px_n_steps: int = 32,
@@ -1269,11 +1356,13 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             initial_params: starting parameters.
             props: parameter properties.
             sample_size: how many samples to draw.
-            emissions: set of observation sequences.
+            emissions: set of observation sequences (or expected observations ``<Y>``).
             inputs: optional set of input sequences.
             mask: optional boolean mask. True = observed, False = missing.
                 Shape (T,), (T, D), (N, T), or (N, T, D). A (T,)/(N, T) mask
                 masks entire observation vectors per timestep.
+            obs_cov: optional per-timestep observation covariance, shape (T, D) for diagonal
+                or (T, D, D) for full. When Y is distributional, this is Cov(y_t).
             bmr_start_iter: iteration at which BMR pruning begins.
 
         Returns:
@@ -1285,13 +1374,21 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         batch_emissions = ensure_array_has_batch_dim(emissions, self.emission_shape)
         batch_inputs = ensure_array_has_batch_dim(inputs, self.inputs_shape)
         batch_mask = ensure_array_has_batch_dim(mask, self.emission_shape) if mask is not None else None
+        if obs_cov is not None:
+            batch_obs_cov = (
+                obs_cov[None, ...]
+                if obs_cov.shape[0] == emissions.shape[-2] and emissions.ndim != obs_cov.ndim
+                else obs_cov
+            )
+        else:
+            batch_obs_cov = None
 
         num_batches, num_timesteps = batch_emissions.shape[:2]
 
         if batch_inputs is None:
             batch_inputs = jnp.zeros((num_batches, num_timesteps, 0))
 
-        def sufficient_stats_from_sample(y, inputs, states, obs_mask=None):
+        def sufficient_stats_from_sample(y, inputs, states, obs_mask=None, _obs_cov=None):
             """Convert samples of states to sufficient statistics."""
             inputs_joint = jnp.pad(inputs, [(0, 0), (0, 1)], constant_values=1.0)
             # Let xn[t] = x[t+1]          for t = 0...T-2
@@ -1314,13 +1411,16 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
                 # Gibbs: no Vx (states are sampled, not expected), pass zeros
                 Vx_zeros = jnp.zeros((num_timesteps, self.state_dim, self.state_dim))
                 emission_stats = _compute_masked_emission_stats(
-                    x, Vx_zeros, u, y, obs_mask, self.state_dim, self.has_emissions_bias
+                    x, Vx_zeros, u, y, obs_mask, self.state_dim, self.has_emissions_bias, obs_cov=_obs_cov
                 )
             else:
                 # Let z[t] = [x[t], u[t]] for t = 0...T-1
                 sum_zzT = jnp.block([[x.T @ x, x.T @ u], [u.T @ x, u.T @ u]])
                 sum_zyT = jnp.block([[x.T @ y], [u.T @ y]])
                 sum_yyT = y.T @ y
+                # Add observation covariance: sum_t Cov(y_t)
+                if _obs_cov is not None:
+                    sum_yyT = sum_yyT + _obs_cov.sum(0)
                 emission_stats = (sum_zzT, sum_zyT, sum_yyT, num_timesteps)
                 if not self.has_emissions_bias:
                     emission_stats = (sum_zzT[:-1, :-1], sum_zyT[:-1, :], sum_yyT, num_timesteps)
@@ -1371,7 +1471,24 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
                 )
 
             elbo = batch_ll.sum() - kl_div
-            if batch_mask is not None:
+            # ELBO correction for distributional observations: -1/2 sum_t tr(R^{-1} Sigma_t)
+            if batch_obs_cov is not None:
+                R = _params.emissions.cov
+                _oc_diag = jnp.diagonal(batch_obs_cov, axis1=-2, axis2=-1) if batch_obs_cov.ndim == 4 else batch_obs_cov
+                if R.ndim == 1:
+                    elbo -= 0.5 * jnp.sum(_oc_diag / R)
+                else:
+                    elbo -= 0.5 * jnp.sum(vmap(lambda oc: jnp.trace(jnp.linalg.solve(R, oc.sum(0))))(_oc_diag))
+            if batch_obs_cov is not None:
+                if batch_mask is not None:
+                    _batch_stats = vmap(sufficient_stats_from_sample)(
+                        batch_emissions, batch_inputs, batch_states, batch_mask, batch_obs_cov
+                    )
+                else:
+                    _batch_stats = vmap(lambda y, i, s, oc: sufficient_stats_from_sample(y, i, s, _obs_cov=oc))(
+                        batch_emissions, batch_inputs, batch_states, batch_obs_cov
+                    )
+            elif batch_mask is not None:
                 _batch_stats = vmap(sufficient_stats_from_sample)(
                     batch_emissions, batch_inputs, batch_states, batch_mask
                 )
