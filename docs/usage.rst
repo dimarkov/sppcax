@@ -58,10 +58,19 @@ Factor Analysis vs. PPCA
 
        model = PFA(n_components=5, n_features=20)
 
-Handling Missing Data
-=====================
+Handling Missing Data (Partial Observations)
+=============================================
 
-Both models can handle missing data by providing a mask:
+Both models can handle missing data by providing a boolean mask where ``True``
+marks observed values and ``False`` marks missing ones. The mask can have shape
+``(T, D)`` for per-element masking, or ``(T,)`` to mask entire observation
+vectors at specific timesteps.
+
+For a comprehensive worked example comparing masked models against subset
+baselines across EM, VB-EM, and Gibbs inference, see the
+:doc:`Masked Observations notebook <theory/examples/test_masking>`.
+
+Here is a minimal example:
 
 .. code-block:: python
 

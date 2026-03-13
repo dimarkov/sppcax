@@ -50,7 +50,7 @@ def _get_params(params: ParamsLGSSMVB, num_timesteps: int, t: int) -> tuple:
         t: Current time index.
 
     Returns:
-        Tuple of (F, B, b, Q, Cx, H, D, d, R, Cy).
+        Tuple of (F, B, b, Q, Cx, H, D, d, R, Cy, ll_em, ll_dyn).
     """
     assert not callable(params.emissions.cov), "Emission covariance cannot be a callable."
 
@@ -62,7 +62,15 @@ def _get_params(params: ParamsLGSSMVB, num_timesteps: int, t: int) -> tuple:
     H = _get_one_param(params.emissions.weights, 2, t)
     D = _get_one_param(params.emissions.input_weights, 2, t)
     d = _get_one_param(params.emissions.bias, 1, t)
-    Cy = _get_one_param(params.emissions.correction.sum(-3), 2, t)
+
+    # Emission correction: (D, dim, dim) needs sum over D; (T, dim, dim) is pre-summed
+    C_em = params.emissions.correction
+    if C_em.ndim == 2:
+        Cy = C_em  # already (dim, dim), static
+    elif C_em.shape[0] == num_timesteps and C_em.ndim == 3:
+        Cy = _get_one_param(C_em, 2, t)  # time-varying, pre-summed
+    else:
+        Cy = _get_one_param(C_em.sum(-3), 2, t)  # (D, dim, dim) → sum over D
 
     if len(params.emissions.cov.shape) == 1:
         R = _get_one_param(params.emissions.cov, 1, t)
@@ -81,7 +89,11 @@ def _get_params(params: ParamsLGSSMVB, num_timesteps: int, t: int) -> tuple:
             stacklevel=2,
         )
 
-    return F, B, b, Q, Cx, H, D, d, R, Cy
+    # Log-likelihood corrections (scalar or time-varying)
+    ll_em = _get_one_param(params.emissions.ll, 0, t) if hasattr(params.emissions.ll, "ndim") else params.emissions.ll
+    ll_dyn = _get_one_param(params.dynamics.ll, 0, t) if hasattr(params.dynamics.ll, "ndim") else params.dynamics.ll
+
+    return F, B, b, Q, Cx, H, D, d, R, Cy, ll_em, ll_dyn
 
 
 def make_lgssm_params(

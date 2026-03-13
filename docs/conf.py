@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.join(__location__, "../src"))
 examples_src = os.path.join(__location__, "..", "examples")
 examples_dst = os.path.join(__location__, "theory", "examples")
 os.makedirs(examples_dst, exist_ok=True)
-for nb in ["test_px_em_fa.ipynb", "test_px_em_dfa.ipynb"]:
+for nb in ["test_px_em_fa.ipynb", "test_px_em_dfa.ipynb", "test_masking.ipynb"]:
     src = os.path.join(examples_src, nb)
     dst = os.path.join(examples_dst, nb)
     if os.path.exists(src):

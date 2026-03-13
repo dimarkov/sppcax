@@ -126,7 +126,7 @@ def lgssm_filter(
         dim = len(pred_mean)
 
         # Shorthand: get parameters and inputs for time index t
-        F, B, b, Q, Cx, H, D, d, R, Cy = _get_params(params, num_timesteps, t)
+        F, B, b, Q, Cx, H, D, d, R, Cy, ll_em, ll_dyn = _get_params(params, num_timesteps, t)
         u = inputs[t]
         y = emissions[t]
 
@@ -137,7 +137,7 @@ def lgssm_filter(
             pred_mean, pred_cov, ll_corr = correct_for_vb(pred_mean, pred_cov, u, Cy, dim)
             # correction of log-likelihood
             # ll_const_y = 0.5 * (mvgamma(df_y/2) + dim * (jnp.log(2) - jnp.log(df_y))) for inverse wishart dist
-            ll += ll_corr + params.emissions.ll
+            ll += ll_corr + ll_em
 
         # Update the log likelihood
         ll += _log_likelihood(pred_mean, pred_cov, H, D, d, R, u, y)
@@ -149,7 +149,7 @@ def lgssm_filter(
         if variational_bayes:
             filtered_mean, filtered_cov, ll_corr = correct_for_vb(filtered_mean, filtered_cov, u, Cx, dim)
             # correction of log-likelihood
-            ll += ll_corr + params.dynamics.ll
+            ll += ll_corr + ll_dyn
 
         # Predict the next state
         pred_mean, pred_cov = _predict(filtered_mean, filtered_cov, F, B, b, Q, u)

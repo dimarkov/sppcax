@@ -219,7 +219,7 @@ def mvnig_posterior_update(
     # compute parameters of the posterior distribution
     nat2_post = -0.5 * (prior_precision + SxxT)
     nat1_post = mvn_prior.apply_mask_vector(nat1 + SxyT.mT)
-    Syy = jnp.diag(SyyT) + jnp.sum(mvn_prior.mean * nat1, -1)
+    Syy = (SyyT if SyyT.ndim == 1 else jnp.diag(SyyT)) + jnp.sum(mvn_prior.mean * nat1, -1)
 
     mvn_post = eqx.tree_at(lambda m: (m.nat1, m.nat2), mvnig_prior.mvn, (nat1_post, nat2_post))
     M_pos = mvn_post.mean
@@ -232,7 +232,7 @@ def mvnig_posterior_update(
     # For isotropic noise (PCA), sum dnat across features since all share one variance
     if mvnig_prior.inv_gamma.batch_shape == ():
         D = dnat2.shape[0]
-        dnat1 = dnat1 * D
+        dnat1 = dnat1.sum() if jnp.ndim(dnat1) > 0 else dnat1 * D
         dnat2 = dnat2.sum()
 
     inv_gamma_post = eqx.tree_at(lambda m: (m.dnat1, m.dnat2), mvnig_prior.inv_gamma, (dnat1, dnat2))
