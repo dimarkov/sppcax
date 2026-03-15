@@ -15,8 +15,9 @@ from multipledispatch import dispatch
 
 from dynamax.utils.distributions import NormalInverseWishart
 
-from sppcax.distributions import MultivariateNormal
+from sppcax.distributions import MultivariateNormal, MeanField
 from sppcax.distributions.mvn_gamma import MultivariateNormalInverseGamma
+from sppcax.distributions.delta import Delta
 from sppcax.distributions.utils import cho_inv
 from sppcax.types import Matrix, Scalar
 
@@ -60,11 +61,16 @@ def _px_rotation_loss(
 
     m_em = emission_posterior.mvn.mean
     Sigma_em = emission_posterior.mvn.covariance
-    psi = emission_posterior.expected_psi
+    psi = jnp.broadcast_to(emission_posterior.expected_psi, (D,))
     Lambda = emission_prior.mvn.precision
     mu = emission_prior.mvn.mean
 
-    second_moment_em = psi[:, None, None] * m_em[:, :, None] * m_em[:, None, :] + Sigma_em
+    # For MVNIG: H|psi ~ N(m, Sigma/psi), so E[psi * HH^T] = psi * m m^T + Sigma
+    # For MeanField: H ~ N(m, Sigma) independent of psi, so E[psi * HH^T] = psi * (m m^T + Sigma)
+    if isinstance(emission_posterior, MeanField):
+        second_moment_em = psi[:, None, None] * (m_em[:, :, None] * m_em[:, None, :] + Sigma_em)
+    else:
+        second_moment_em = psi[:, None, None] * m_em[:, :, None] * m_em[:, None, :] + Sigma_em
     SM_rot = jnp.einsum("ij,djk,kl->dil", R_block_em.T, second_moment_em, R_block_em)
     trace_em = jnp.einsum("dij,dji->d", Lambda, SM_rot)
     cross_em = jnp.einsum("di,dij,jk,dk->d", mu, Lambda, R_block_em.T, m_em)
@@ -244,3 +250,107 @@ def rotate_distribution(dist, R, R_inv, state_dim) -> NormalInverseWishart:  # n
     new_loc = R_inv @ dist.loc
     new_scale = R_inv @ dist.scale @ R_inv.T
     return NormalInverseWishart(new_loc, dist.mean_concentration, dist.df, new_scale)
+
+
+@dispatch(MultivariateNormalInverseGamma, object, object, int, str)
+def rotate_distribution(dist, R, R_inv, state_dim, role) -> MultivariateNormalInverseGamma:  # noqa: F811
+    """Rotate MVNIG with role parameter (role ignored, forwards to 4-arg version)."""
+    return rotate_distribution(dist, R, R_inv, state_dim)
+
+
+@dispatch(MultivariateNormal, object, object, int, str)
+def rotate_distribution(dist, R, R_inv, state_dim, role) -> MultivariateNormal:  # noqa: F811
+    """Rotate MVN with role parameter (role ignored, forwards to 4-arg version)."""
+    return rotate_distribution(dist, R, R_inv, state_dim)
+
+
+@dispatch(NormalInverseWishart, object, object, int, str)
+def rotate_distribution(dist, R, R_inv, state_dim, role) -> NormalInverseWishart:  # noqa: F811
+    """Rotate NIW with role parameter (role ignored, forwards to 4-arg version)."""
+    return rotate_distribution(dist, R, R_inv, state_dim)
+
+
+@dispatch(MeanField, object, object, int, str)
+def rotate_distribution(dist, R, R_inv, state_dim, role) -> MeanField:  # noqa: F811
+    """Rotate MeanField distribution based on its role.
+
+    Args:
+        dist: MeanField distribution.
+        R: Rotation matrix (K, K).
+        R_inv: Inverse rotation matrix (K, K).
+        state_dim: Latent state dimension K.
+        role: 'emission', 'dynamics', or 'initial'.
+
+    Returns:
+        Rotated MeanField distribution.
+    """
+    K = state_dim
+
+    if role == "emission":
+        # Emission weights: H -> H @ R (right multiply)
+        # Rotate the MVN weights component
+        if isinstance(dist.weights, Delta):
+            # Frozen weights: rotate the Delta value directly
+            new_mean = dist.weights.mean  # no rotation for Delta (frozen)
+            new_weights = dist.weights
+        else:
+            dim = dist.weights.nat1.shape[-1]
+            R_block = jnp.eye(dim).at[:K, :K].set(R)
+            R_inv_block = jnp.eye(dim).at[:K, :K].set(R_inv)
+
+            new_mean = dist.weights.mean @ R_block
+            new_nat2 = R_inv_block @ dist.weights.nat2 @ R_inv_block.T
+            new_nat1 = jnp.squeeze((-2 * new_nat2) @ new_mean[..., None], -1)
+
+            new_weights = eqx.tree_at(lambda m: (m.nat1, m.nat2), dist.weights, (new_nat1, new_nat2))
+
+        # Noise unchanged for emission (per-row, rows not mixed)
+        return MeanField(weights=new_weights, noise=dist.noise)
+
+    elif role == "dynamics":
+        # Dynamics weights: F -> R_inv @ F @ R (left+right multiply)
+        if isinstance(dist.weights, Delta):
+            new_weights = dist.weights
+        else:
+            dim = dist.weights.nat1.shape[-1]
+            R_block = jnp.eye(dim).at[:K, :K].set(R)
+            R_inv_block = jnp.eye(dim).at[:K, :K].set(R_inv)
+
+            new_mean = R_inv @ dist.weights.mean @ R_block
+            w = jnp.sum(jnp.square(R_inv), -1)  # (K, K)
+            new_nat2 = (R_inv_block @ dist.weights.nat2 @ R_inv_block.T) / w[:, None, None]
+            new_nat1 = jnp.squeeze((-2 * new_nat2) @ new_mean[..., None], -1)
+
+            new_weights = eqx.tree_at(lambda d: (d.nat1, d.nat2), dist.weights, (new_nat1, new_nat2))
+
+        # Noise unchanged for dynamics (Delta(I) stays identity)
+        return MeanField(weights=new_weights, noise=dist.noise)
+
+    elif role == "initial":
+        # Initial mean: m -> R_inv @ m
+        if isinstance(dist.weights, Delta):
+            new_weights = dist.weights
+        else:
+            new_mean = R_inv @ dist.weights.mean
+            # For initial, precision rotates as: P_new = R @ P @ R^T
+            new_nat2 = R_inv @ dist.weights.nat2 @ R_inv.T
+            new_nat1 = jnp.squeeze((-2 * new_nat2) @ new_mean[..., None], -1)
+            new_weights = eqx.tree_at(lambda d: (d.nat1, d.nat2), dist.weights, (new_nat1, new_nat2))
+
+        # Noise (covariance): S -> R_inv @ S @ R_inv^T
+        if isinstance(dist.noise, Delta):
+            # Rotate Delta value if it's a matrix (covariance)
+            val = dist.noise.mean
+            if val.ndim >= 2:
+                new_val = R_inv @ val @ R_inv.T
+                new_noise = Delta(new_val)
+            else:
+                new_noise = dist.noise
+        else:
+            # Generic rotation for noise component (e.g., InverseWishart)
+            new_noise = dist.noise  # TODO: implement IW rotation if needed
+
+        return MeanField(weights=new_weights, noise=new_noise)
+
+    else:
+        raise ValueError(f"Unknown role: {role}. Must be 'emission', 'dynamics', or 'initial'.")

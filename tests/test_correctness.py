@@ -498,8 +498,7 @@ class TestEdgeCases:
     def test_short_timeseries_dfa(self):
         """DFA with very short time series should not crash."""
         key = jr.PRNGKey(42)
-        Y, _, _, _ = generate_timeseries_data(key, n_timesteps=10, n_components=2)
-        Y = Y[:10]  # Ensure exactly 10 timesteps
+        Y, _, _, _ = generate_timeseries_data(key, n_timesteps=8, n_components=2)
 
         model = BayesianDynamicFactorAnalysis(
             state_dim=2,

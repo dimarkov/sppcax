@@ -15,7 +15,7 @@ from dynamax.utils.distributions import (
     NormalInverseWishart,
 )
 
-from sppcax.distributions import Distribution, MultivariateNormal
+from sppcax.distributions import Distribution, MultivariateNormal, MeanField
 from sppcax.distributions.mvn_gamma import MultivariateNormalInverseGamma, mvnig_posterior_update
 from sppcax.distributions.utils import cho_inv
 from sppcax.distributions.delta import Delta
@@ -174,7 +174,9 @@ def get_moments(dist):  # noqa: F811
 def get_moments(dist):  # noqa: F811
     """Expected moments of MVNIG distribution."""
     mean = dist.mean
-    covariance = jnp.diag(dist.expected_psi)
+    psi = dist.expected_psi
+    n = dist.mean.shape[0]
+    covariance = jnp.diag(jnp.broadcast_to(psi, (n,)))
     return covariance, mean
 
 
@@ -231,3 +233,80 @@ def get_correction(dist):  # noqa: F811
 def get_correction(dist):  # noqa: F811
     """Posterior correction term for MVN distribution."""
     return dist.covariance
+
+
+# ---------------------------------------------------------------------------
+# MeanField dispatches
+# ---------------------------------------------------------------------------
+
+
+@dispatch(MeanField, tuple, object)
+def posterior_update(dist, stats, props):  # noqa: F811
+    """Update MeanField posterior via coordinate ascent.
+
+    Alternates between updating the weights component (using noise expectations)
+    and the noise component (using weights expectations).
+    """
+    trainable_weights = (
+        hasattr(props, "weights") and props.weights.trainable or (hasattr(props, "mean") and props.mean.trainable)
+    )
+    trainable_cov = hasattr(props, "cov") and props.cov.trainable
+
+    if not trainable_weights and not trainable_cov:
+        return dist
+
+    weights_prior = dist.weights
+    noise_prior = dist.noise
+
+    # Single coordinate ascent step: update weights then noise.
+    # The outer EM loop drives convergence across iterations.
+    noise_exp = noise_prior.mf_expectations()
+    weights = weights_prior.mf_update(weights_prior, stats, noise_exp)
+
+    weights_exp = weights.mf_expectations()
+    noise = noise_prior.mf_update(noise_prior, stats, weights_exp)
+
+    return MeanField(weights=weights, noise=noise)
+
+
+@dispatch(MeanField)
+def get_mode(dist):  # noqa: F811
+    """Mode of MeanField distribution."""
+    return dist.mode()
+
+
+@dispatch(MeanField, object)
+def get_sample(dist, key):  # noqa: F811
+    """Sample from MeanField distribution."""
+    return dist.sample(seed=key)
+
+
+@dispatch(MeanField)
+def get_moments(dist):  # noqa: F811
+    """Expected moments of MeanField distribution."""
+    mean = dist.mean
+    if isinstance(dist.noise, Delta):
+        n = dist.batch_shape[0] if dist.batch_shape else 1
+        covariance = jnp.eye(n)
+    else:
+        psi = dist.expected_psi
+        n = dist.mean.shape[0]
+        covariance = jnp.diag(jnp.broadcast_to(psi, (n,)))
+    return covariance, mean
+
+
+@dispatch(MeanField)
+def get_ll_correction(dist):  # noqa: F811
+    """Log-likelihood correction for MeanField distribution."""
+    from sppcax.distributions.gamma import InverseGamma
+
+    if isinstance(dist.noise, InverseGamma):
+        alpha = dist.noise.alpha
+        return jnp.sum(digamma(alpha) - jnp.log(alpha)) / 2
+    return 0.0
+
+
+@dispatch(MeanField)
+def get_correction(dist):  # noqa: F811
+    """Posterior correction term for MeanField distribution."""
+    return dist.weights.covariance

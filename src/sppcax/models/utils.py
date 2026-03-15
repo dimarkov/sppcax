@@ -1,8 +1,10 @@
 from typing import Optional
 
 from jax import numpy as jnp, random as jr
-from sppcax.distributions import MultivariateNormalInverseGamma
+from sppcax.distributions import MeanField
 from sppcax.distributions import MultivariateNormal
+from sppcax.distributions.gamma import InverseGamma
+from sppcax.distributions.delta import Delta
 from sppcax.types import PRNGKey
 
 
@@ -13,8 +15,8 @@ def _make_mvnig_prior(
     has_bias: bool = True,
     isotropic_noise: bool = False,
     key: Optional[PRNGKey] = None,
-) -> MultivariateNormalInverseGamma:
-    """Create a default MVNIG emission prior for FA/PCA.
+) -> MeanField:
+    """Create a default MeanField(MVN, InverseGamma) emission prior for FA/PCA.
 
     Args:
         n_features: Number of observed features (emission_dim).
@@ -25,7 +27,7 @@ def _make_mvnig_prior(
         key: Optional random key for initialization.
 
     Returns:
-        Default MVNIG emission prior.
+        Default MeanField emission prior.
     """
     dim = n_components + has_bias + input_dim  # columns: [H, U, d] or just [H, U]
     if key is not None:
@@ -33,7 +35,14 @@ def _make_mvnig_prior(
     else:
         loc = jnp.zeros((n_features, dim))
 
-    return MultivariateNormalInverseGamma(loc=loc, alpha0=2.0, beta0=1.0, isotropic_noise=isotropic_noise)
+    weights = MultivariateNormal(loc=loc)
+
+    if isotropic_noise:
+        noise = InverseGamma(alpha0=2.0, beta0=1.0)
+    else:
+        noise = InverseGamma(alpha0=2.0 * jnp.ones(n_features), beta0=1.0 * jnp.ones(n_features))
+
+    return MeanField(weights=weights, noise=noise)
 
 
 def _make_mvn_prior(
@@ -41,8 +50,8 @@ def _make_mvn_prior(
     input_dim: int,
     has_bias: bool = True,
     key: Optional[PRNGKey] = None,
-) -> MultivariateNormal:
-    """Create a default MVN dynamics prior for DFA.
+) -> MeanField:
+    """Create a default MeanField(MVN, Delta) dynamics prior for DFA.
 
     Args:
         state_dim: Number of latent components (state_dim).
@@ -51,11 +60,14 @@ def _make_mvn_prior(
         key: Optional random key for initialization.
 
     Returns:
-        Default MVN dynamics prior.
+        Default MeanField dynamics prior.
     """
     dim = state_dim + input_dim + has_bias  # columns: [F, U, b] or just [F, U]
     loc = jnp.zeros((state_dim, dim))
     if key is not None:
         loc += jr.normal(key, (state_dim, dim)) * 0.01
 
-    return MultivariateNormal(loc=loc)
+    weights = MultivariateNormal(loc=loc)
+    noise = Delta(jnp.ones(state_dim))  # Q=I diagonal
+
+    return MeanField(weights=weights, noise=noise)

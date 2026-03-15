@@ -88,6 +88,40 @@ class Delta(Distribution):
         return jnp.zeros(self.batch_shape)
 
     @property
+    def precision(self) -> Array:
+        """Precision (infinite for delta, but return large finite value for compatibility)."""
+        return jnp.inf * jnp.ones_like(self.covariance)
+
+    @property
+    def expected_precision(self) -> Array:
+        """Expected precision E[1/X] for Delta is 1/location (element-wise)."""
+        return 1.0 / self.mean
+
+    @property
+    def expected_log_precision(self) -> Array:
+        """Expected log-precision E[-log(X)] for Delta is -log(location)."""
+        return -jnp.log(self.mean)
+
+    @property
+    def expected_second_moment(self) -> Array:
+        """Expected second moment E[XX^T] = location @ location^T (no variance)."""
+        return self.mean[..., :, None] * self.mean[..., None, :]
+
+    def mf_expectations(self) -> dict:
+        """Return expectations for mean-field coordinate ascent partner."""
+        return {
+            "mean": self.mean,
+            "nat1": jnp.zeros_like(self.mean),
+            "second_moment": self.expected_second_moment,
+            "expected_precision": self.expected_precision,
+            "expected_log_precision": self.expected_log_precision,
+        }
+
+    def mf_update(self, prior, stats, partner_expectations) -> "Delta":
+        """Mean-field update for Delta is a no-op (fixed component)."""
+        return self
+
+    @property
     def expected_sufficient_statistics(self) -> Array:
         """Compute expected sufficient statistics.
 

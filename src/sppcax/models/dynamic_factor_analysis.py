@@ -27,7 +27,7 @@ from dynamax.linear_gaussian_ssm.parallel_inference import (
 from dynamax.utils.bijectors import RealToPSDBijector
 
 from sppcax.types import Array, Vector, Matrix, PRNGKey, Float
-from sppcax.distributions import Distribution, Gamma, MultivariateNormal
+from sppcax.distributions import Distribution, Gamma, MultivariateNormal, MeanField
 from sppcax.distributions.delta import Delta
 from sppcax.distributions.mvn_gamma import MultivariateNormalInverseGamma
 from sppcax.distributions.updates import (
@@ -51,6 +51,20 @@ from sppcax.parameter_expansion import (
     compute_px_rotation_numerical as _compute_px_rotation_numerical,
     rotate_distribution,
 )
+
+
+def _filter_cond(pred, true_fn, false_fn, operand):
+    """Like lax.cond but handles pytrees with non-array leaves (e.g. Callable)."""
+    dynamic, static = eqx.partition(operand, eqx.is_array)
+
+    def _true(d):
+        return eqx.partition(true_fn(eqx.combine(d, static)), eqx.is_array)[0]
+
+    def _false(d):
+        return eqx.partition(false_fn(eqx.combine(d, static)), eqx.is_array)[0]
+
+    result_dynamic = lax.cond(pred, _true, _false, dynamic)
+    return eqx.combine(result_dynamic, static)
 
 
 def _normalize_mask(mask, emission_dim):
@@ -416,12 +430,12 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         kl_div = 0.0
 
         # --- 1. Compute posteriors ---
-        if self.has_ard and isinstance(self.emission_prior, MultivariateNormalInverseGamma):
+        if self.has_ard and isinstance(self.emission_prior, (MultivariateNormalInverseGamma, MeanField)):
             emission_prior = self._apply_ard_to_emission_prior(self.emission_prior, m_step_state.emission)
         else:
             emission_prior = self.emission_prior
 
-        if self.has_ard and isinstance(self.dynamics_prior, MultivariateNormal) and not self.is_static:
+        if self.has_ard and isinstance(self.dynamics_prior, (MultivariateNormal, MeanField)) and not self.is_static:
             dynamics_prior = self._apply_ard_to_dynamics_prior(self.dynamics_prior, m_step_state.dynamics)
         else:
             dynamics_prior = self.dynamics_prior
@@ -444,15 +458,15 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
                 n_steps=px_n_steps,
                 lr=px_lr,
             )
-            emission_posterior = rotate_distribution(emission_posterior, R, R_inv, self.state_dim)
+            emission_posterior = rotate_distribution(emission_posterior, R, R_inv, self.state_dim, "emission")
             if not self.is_static:
-                dynamics_posterior = rotate_distribution(dynamics_posterior, R, R_inv, self.state_dim)
-                initial_posterior = rotate_distribution(initial_posterior, R, R_inv, self.state_dim)
+                dynamics_posterior = rotate_distribution(dynamics_posterior, R, R_inv, self.state_dim, "dynamics")
+                initial_posterior = rotate_distribution(initial_posterior, R, R_inv, self.state_dim, "initial")
 
         # --- 3. BMR on posteriors ---
         if self.use_bmr.initial and key is not None:
             key, _key = jr.split(key)
-            initial_posterior = lax.cond(
+            initial_posterior = _filter_cond(
                 enable_bmr,
                 lambda p: prune_params(p, self.initial_prior, key=_key),
                 lambda p: p,
@@ -460,7 +474,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             )
         if self.use_bmr.dynamics and key is not None:
             key, _key = jr.split(key)
-            dynamics_posterior = lax.cond(
+            dynamics_posterior = _filter_cond(
                 enable_bmr,
                 lambda p: prune_params(p, dynamics_prior, key=_key),
                 lambda p: p,
@@ -468,7 +482,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             )
         if self.use_bmr.emissions and key is not None:
             key, _key = jr.split(key)
-            emission_posterior = lax.cond(
+            emission_posterior = _filter_cond(
                 enable_bmr,
                 lambda p: prune_params(p, emission_prior, key=_key),
                 lambda p: p,
@@ -483,12 +497,12 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         kl_div += kl_divergence(emission_posterior, emission_prior)
 
         # --- 5. ARD updates ---
-        if self.has_ard and isinstance(emission_posterior, MultivariateNormalInverseGamma):
+        if self.has_ard and isinstance(emission_posterior, (MultivariateNormalInverseGamma, MeanField)):
             em_updates = self._compute_ard_updates(emission_posterior, self.state_dim)
             ard_em_post = eqx.tree_at(lambda d: (d.dnat1, d.dnat2), self.ard_prior.emission, em_updates)
             kl_div += ard_em_post.kl_divergence_from_prior.sum()
 
-            if isinstance(dynamics_posterior, MultivariateNormal) and not self.is_static:
+            if isinstance(dynamics_posterior, (MultivariateNormal, MeanField)) and not self.is_static:
                 dyn_updates = self._compute_dynamics_ard_updates(dynamics_posterior, self.state_dim)
                 ard_dyn_post = eqx.tree_at(lambda d: (d.dnat1, d.dnat2), self.ard_prior.dynamics, dyn_updates)
                 kl_div += ard_dyn_post.kl_divergence_from_prior.sum()
@@ -665,9 +679,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         return dnat1_tau, dnat2_tau
 
     @staticmethod
-    def _apply_ard_to_emission_prior(
-        emission_prior: MultivariateNormalInverseGamma, m_step_state: Gamma
-    ) -> MultivariateNormalInverseGamma:
+    def _apply_ard_to_emission_prior(emission_prior, m_step_state: Gamma):
         """Modify emission prior precision by incorporating ARD tau from previous iteration.
 
         Reconstructs the ARD posterior from m_step_state, computes E[tau], and adds it
@@ -681,25 +693,37 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         E_tau = ard_dist.mean  # (K,)
         K = len(E_tau)
 
-        loc = emission_prior.mvn.mean
-        precision = emission_prior.mvn.precision
+        # Access weights component (works for both MVNIG.mvn and MeanField.weights)
+        weights = emission_prior.mvn
+        loc = weights.mean
+        precision = weights.precision
         precision = precision.at[:, :K, :K].set(jnp.diag(E_tau))
-        mask = emission_prior.mvn.mask
+        mask = weights.mask
         mvn = MultivariateNormal(loc=loc, precision=precision, mask=mask)
 
-        modified_prior = eqx.tree_at(lambda p: p.mvn, emission_prior, mvn)
-        return modified_prior
+        if isinstance(emission_prior, MeanField):
+            return eqx.tree_at(lambda p: p.weights, emission_prior, mvn)
+        else:
+            return eqx.tree_at(lambda p: p.mvn, emission_prior, mvn)
 
     @staticmethod
-    def _apply_ard_to_dynamics_prior(dynamics_prior: MultivariateNormal, m_step_state: Gamma) -> MultivariateNormal:
-        """Modify dynamics MVN prior precision by incorporating ARD tau.
+    def _apply_ard_to_dynamics_prior(dynamics_prior, m_step_state: Gamma):
+        """Modify dynamics prior precision by incorporating ARD tau.
 
         Sets the first K×K block of the per-row precision to diag(E[tau]).
         """
         E_tau = m_step_state.mean  # (K,)
         K = len(E_tau)
-        precision = dynamics_prior.precision.at[:, :K, :K].set(jnp.diag(E_tau))
-        return MultivariateNormal(loc=dynamics_prior.mean, precision=precision, mask=dynamics_prior.mask)
+
+        # Access weights component (works for both MVN directly and MeanField.weights)
+        weights = dynamics_prior.mvn if isinstance(dynamics_prior, MeanField) else dynamics_prior
+        precision = weights.precision.at[:, :K, :K].set(jnp.diag(E_tau))
+        new_weights = MultivariateNormal(loc=weights.mean, precision=precision, mask=weights.mask)
+
+        if isinstance(dynamics_prior, MeanField):
+            return eqx.tree_at(lambda p: p.weights, dynamics_prior, new_weights)
+        else:
+            return new_weights
 
     def transform(
         self,

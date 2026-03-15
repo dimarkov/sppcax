@@ -4,6 +4,7 @@ from typing import ClassVar, Optional
 
 import jax.numpy as jnp
 import jax.random as jr
+import equinox as eqx
 from jax.scipy.linalg import solve, solve_triangular
 
 from ..types import Array, Matrix, PRNGKey, Shape, Vector
@@ -233,3 +234,45 @@ class MultivariateNormal(ExponentialFamily):
         smpl = solve_triangular(L.mT, smpl[..., None], lower=False)[..., 0]
 
         return self.apply_mask_vector(smpl)
+
+    @property
+    def expected_second_moment(self) -> Array:
+        """Expected second moment E[xx^T] = Cov + mean @ mean^T, per row."""
+        m = self.mean
+        return self.covariance + m[..., :, None] * m[..., None, :]
+
+    def mf_expectations(self) -> dict:
+        """Return expectations for mean-field coordinate ascent partner."""
+        return {
+            "mean": self.mean,
+            "nat1": self.nat1,
+            "second_moment": self.expected_second_moment,
+        }
+
+    def mf_update(self, prior: "MultivariateNormal", stats: tuple, partner_expectations: dict) -> "MultivariateNormal":
+        """Mean-field coordinate ascent update for MVN weights.
+
+        Scales data sufficient statistics by partner's expected precision E[1/sigma^2],
+        then performs standard natural parameter update.
+
+        Args:
+            prior: Prior MVN distribution.
+            stats: Sufficient statistics tuple (SxxT, SxyT, SyyT, N).
+            partner_expectations: Dict with 'expected_precision' from noise component.
+
+        Returns:
+            Updated MVN distribution (posterior).
+        """
+        E_psi = partner_expectations["expected_precision"]  # (D,) or scalar
+        SxxT, SxyT, *_ = stats
+
+        prior_precision = -2.0 * prior.nat2  # (D, dim, dim) or (dim, dim)
+
+        # Scale data statistics by noise expected precision
+        data_precision = E_psi[..., None, None] * SxxT  # (D, dim, dim) broadcast
+        data_nat1 = E_psi[..., None] * SxyT.mT  # (D, dim) broadcast
+
+        nat2_post = -0.5 * (prior_precision + data_precision)
+        nat1_post = prior.apply_mask_vector(prior.nat1 + data_nat1)
+
+        return eqx.tree_at(lambda d: (d.nat1, d.nat2), prior, (nat1_post, nat2_post))

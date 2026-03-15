@@ -4,7 +4,13 @@ import jax.numpy as jnp
 from jax.scipy.special import digamma, multigammaln
 from multipledispatch import dispatch
 
-from sppcax.distributions import MultivariateNormalInverseGamma as MVNIG, InverseGamma, MultivariateNormal as MVN
+from sppcax.distributions import (
+    MultivariateNormalInverseGamma as MVNIG,
+    InverseGamma,
+    MultivariateNormal as MVN,
+    MeanField,
+)
+from sppcax.distributions.delta import Delta
 from sppcax.types import Array, Scalar
 from dynamax.utils.distributions import NormalInverseWishart as NIW, MatrixNormalInverseWishart as MNIW, InverseWishart
 from tensorflow_probability.substrates import jax as tfp
@@ -185,3 +191,23 @@ def kl_divergence(q: MVN, p: MVN) -> Scalar:  # noqa: F811
     kl_div -= 0.5 * (jnp.linalg.slogdet(P_p)[1] - jnp.linalg.slogdet(q.precision)[1]).sum()
 
     return kl_div
+
+
+@dispatch(Delta, Delta)
+def kl_divergence(q: Delta, p: Delta) -> Scalar:  # noqa: F811
+    """KL divergence between two Delta distributions is always 0."""
+    return 0.0
+
+
+@dispatch(MeanField, MeanField)
+def kl_divergence(q: MeanField, p: MeanField) -> Scalar:  # noqa: F811
+    """KL divergence KL(q||p) between two MeanField distributions.
+
+    Sum of component KL divergences (independence assumption).
+    """
+    kl_weights = kl_divergence(q.weights, p.weights)
+    kl_noise = kl_divergence(q.noise, p.noise)
+    # Reduce noise KL to scalar (e.g. per-feature InverseGamma returns (D,))
+    if hasattr(kl_noise, "ndim") and kl_noise.ndim > 0:
+        kl_noise = jnp.sum(kl_noise)
+    return kl_weights + kl_noise

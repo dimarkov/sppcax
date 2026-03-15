@@ -7,7 +7,7 @@ from jax import random as jr
 from jax.scipy.special import digamma
 from multipledispatch import dispatch
 
-from ..distributions import Beta, MultivariateNormal as MVN, MultivariateNormalInverseGamma as MVNIG
+from ..distributions import Beta, MultivariateNormal as MVN, MultivariateNormalInverseGamma as MVNIG, MeanField
 from ..types import PRNGKey
 from .delta_f import gibbs_sampler_mvn, gibbs_sampler_mvnig
 
@@ -151,6 +151,26 @@ def prune_params(post: MVN, prior: MVN, *, key: PRNGKey, max_iter: int = 8) -> M
     opt_post = eqx.tree_at(lambda d: (d.mask,), post, (mask,))
 
     return opt_post
+
+
+@dispatch(MeanField, MeanField)
+def prune_params(post: MeanField, prior: MeanField, *, key: PRNGKey, max_iter: int = 8) -> MeanField:  # noqa: F811
+    """Applies Bayesian model reduction to a MeanField distribution.
+
+    Prunes only the weights component using MVN BMR rules.
+    The noise component is unaffected.
+
+    Args:
+        post: Posterior MeanField distribution.
+        prior: Prior MeanField distribution.
+        key: Random number generator key.
+        max_iter: Maximal number of iterations for the Gibbs sampler.
+
+    Returns:
+        MeanField with pruned weights component.
+    """
+    pruned_weights = prune_params(post.weights, prior.weights, key=key, max_iter=max_iter)
+    return eqx.tree_at(lambda d: d.weights, post, pruned_weights)
 
 
 @dispatch(MVN)

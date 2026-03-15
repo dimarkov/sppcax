@@ -5,6 +5,7 @@ from typing import ClassVar
 import jax.numpy as jnp
 import jax.random as jr
 import jax.scipy.special as jsp
+import equinox as eqx
 
 from ..types import Array, PRNGKey, Shape
 from .exponential_family import ExponentialFamily
@@ -384,3 +385,65 @@ class InverseGamma(ExponentialFamily):
         )
 
         return -self.log_normalizer + other_log_normalizer + inner_product
+
+    @property
+    def expected_precision(self) -> Array:
+        """Expected precision E[1/x] = alpha/beta for InverseGamma."""
+        return self.alpha / self.beta
+
+    @property
+    def expected_log_precision(self) -> Array:
+        """Expected log-precision E[-log(x)] = digamma(alpha) - log(beta)."""
+        return jsp.digamma(self.alpha) - jnp.log(self.beta)
+
+    def mf_expectations(self) -> dict:
+        """Return expectations for mean-field coordinate ascent partner."""
+        return {
+            "expected_precision": self.expected_precision,
+            "expected_log_precision": self.expected_log_precision,
+        }
+
+    def mf_update(self, prior: "InverseGamma", stats: tuple, partner_expectations: dict) -> "InverseGamma":
+        """Mean-field coordinate ascent update for InverseGamma noise.
+
+        Given partner (weights) expectations, compute the residual and update
+        the InverseGamma natural parameters.
+
+        Args:
+            prior: Prior InverseGamma distribution.
+            stats: Sufficient statistics tuple (SxxT, SxyT, SyyT, N).
+            partner_expectations: Dict with 'mean' and 'second_moment' from weights.
+
+        Returns:
+            Updated InverseGamma distribution.
+        """
+        SxxT, SxyT, SyyT, N = stats
+
+        M = partner_expectations["mean"]  # (D, dim)
+        E_wwT = partner_expectations["second_moment"]  # (D, dim, dim)
+
+        # SyyT diagonal: (D,) or (D, D)
+        SyyT_diag = jnp.diag(SyyT) if SyyT.ndim == 2 else SyyT  # (D,)
+
+        # Cross term: sum_d M_d^T SxyT_d = einsum('di,id->d', M, SxyT)
+        cross_term = jnp.einsum("di,id->d", M, SxyT)  # (D,)
+
+        # Trace term: tr(E[w_d w_d^T] @ SxxT) per row
+        if SxxT.ndim == 2:
+            tr_term = jnp.einsum("dij,ji->d", E_wwT, SxxT)  # (D,)
+        else:
+            tr_term = jnp.einsum("dij,dji->d", E_wwT, SxxT)  # (D,)
+
+        # Residual: E[sum_t (y_dt - w_d^T z_t)^2]
+        residual = SyyT_diag - 2 * cross_term + tr_term  # (D,)
+
+        dnat1 = -N / 2
+        dnat2 = -residual / 2
+
+        # For isotropic noise (scalar batch), sum across features
+        if prior.batch_shape == ():
+            D = dnat2.shape[0]
+            dnat1 = dnat1 * D if jnp.ndim(dnat1) == 0 else dnat1.sum()
+            dnat2 = dnat2.sum()
+
+        return eqx.tree_at(lambda m: (m.dnat1, m.dnat2), prior, (dnat1, dnat2))
