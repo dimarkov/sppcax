@@ -6,6 +6,7 @@ import jax.numpy as jnp
 
 from ..types import Array, PRNGKey, Shape
 from .base import Distribution
+from .utils import cho_inv, safe_cholesky_and_logdet
 
 
 def default_ss(x: Array) -> Array:
@@ -60,6 +61,9 @@ class Delta(Distribution):
         equal = jnp.all(x == self.mean, axis=tuple(range(-len(self.event_shape), 0)))
         return jnp.where(equal, 0.0, -jnp.inf)
 
+    def mode(self) -> Array:
+        return self.mean
+
     @property
     def covariance(self) -> Array:
         """Covariance matrix (always zero for delta distribution)."""
@@ -94,13 +98,18 @@ class Delta(Distribution):
 
     @property
     def expected_precision(self) -> Array:
-        """Expected precision E[1/X] for Delta is 1/location (element-wise)."""
+        """Expected precision for Delta: matrix inverse for square matrices, element-wise otherwise."""
+        if self.mean.ndim >= 2 and self.mean.shape[-1] == self.mean.shape[-2]:
+            return cho_inv(self.mean)
         return 1.0 / self.mean
 
     @property
-    def expected_log_precision(self) -> Array:
-        """Expected log-precision E[-log(X)] for Delta is -log(location)."""
-        return -jnp.log(self.mean)
+    def expected_logdet_precision(self) -> Array:
+        """Expected log-precision for Delta: -log|X| for matrices, -log(X) otherwise."""
+        if self.mean.ndim >= 2 and self.mean.shape[-1] == self.mean.shape[-2]:
+            _, logdet = safe_cholesky_and_logdet(self.mean)
+            return -logdet
+        return -jnp.sum(jnp.log(self.mean))
 
     @property
     def expected_second_moment(self) -> Array:
@@ -111,13 +120,11 @@ class Delta(Distribution):
         """Return expectations for mean-field coordinate ascent partner."""
         return {
             "mean": self.mean,
-            "nat1": jnp.zeros_like(self.mean),
             "second_moment": self.expected_second_moment,
             "expected_precision": self.expected_precision,
-            "expected_log_precision": self.expected_log_precision,
         }
 
-    def mf_update(self, prior, stats, partner_expectations) -> "Delta":
+    def mf_update(self, *args) -> "Delta":
         """Mean-field update for Delta is a no-op (fixed component)."""
         return self
 

@@ -57,7 +57,7 @@ def test_ppca_array_input():
 
     # Check isotropic noise
     R = params.emissions.cov
-    R_diag = jnp.diag(R)
+    R_diag = R if R.ndim == 1 else jnp.diag(R)
     assert jnp.allclose(R_diag, R_diag[0] * jnp.ones_like(R_diag), atol=1e-5)
 
     qz = model.transform(params, X)

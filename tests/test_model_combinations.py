@@ -138,7 +138,7 @@ class TestFASubclasses:
         assert jnp.isfinite(elbos[-1])
 
         # Check isotropic noise: cov should be scalar * I
-        R_diag = jnp.diag(params.emissions.cov)
+        R_diag = params.emissions.cov if params.emissions.cov.ndim == 1 else jnp.diag(params.emissions.cov)
         assert jnp.allclose(R_diag, R_diag[0] * jnp.ones_like(R_diag), atol=1e-5)
 
     def test_bayesian_fa_transform(self):
@@ -253,7 +253,7 @@ class TestFAFitting:
             )
 
         # Check isotropic noise
-        R_diag = jnp.diag(params.emissions.cov)
+        R_diag = params.emissions.cov if params.emissions.cov.ndim == 1 else jnp.diag(params.emissions.cov)
         assert jnp.allclose(R_diag, R_diag[0] * jnp.ones_like(R_diag), atol=1e-5)
 
     def test_fa_no_bias(self):

@@ -9,6 +9,7 @@ from .gamma import Gamma, InverseGamma
 from .mvn import MultivariateNormal
 from .mean_field import MeanField
 from .mvn_gamma import MultivariateNormalInverseGamma
+from .inverse_wishart import InverseWishart
 from .normal import Normal
 from .poisson import Poisson
 
@@ -23,6 +24,7 @@ __all__ = [
     "Poisson",
     "Gamma",
     "InverseGamma",
+    "InverseWishart",
     "Beta",
     "Delta",
 ]

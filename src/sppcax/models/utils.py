@@ -2,8 +2,7 @@ from typing import Optional
 
 from jax import numpy as jnp, random as jr
 from sppcax.distributions import MeanField
-from sppcax.distributions import MultivariateNormal
-from sppcax.distributions.gamma import InverseGamma
+from sppcax.distributions import MultivariateNormalInverseGamma, MultivariateNormal
 from sppcax.distributions.delta import Delta
 from sppcax.types import PRNGKey
 
@@ -35,14 +34,7 @@ def _make_mvnig_prior(
     else:
         loc = jnp.zeros((n_features, dim))
 
-    weights = MultivariateNormal(loc=loc)
-
-    if isotropic_noise:
-        noise = InverseGamma(alpha0=2.0, beta0=1.0)
-    else:
-        noise = InverseGamma(alpha0=2.0 * jnp.ones(n_features), beta0=1.0 * jnp.ones(n_features))
-
-    return MeanField(weights=weights, noise=noise)
+    return MultivariateNormalInverseGamma(loc=loc, isotropic_noise=isotropic_noise)
 
 
 def _make_mvn_prior(
@@ -68,6 +60,6 @@ def _make_mvn_prior(
         loc += jr.normal(key, (state_dim, dim)) * 0.01
 
     weights = MultivariateNormal(loc=loc)
-    noise = Delta(jnp.ones(state_dim))  # Q=I diagonal
+    noise = Delta(jnp.eye(state_dim))  # Q=I diagonal
 
     return MeanField(weights=weights, noise=noise)

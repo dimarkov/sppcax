@@ -11,8 +11,9 @@ and vmap over batches handles parallelism.
 from typing import Optional
 
 import jax.numpy as jnp
-from dynamax.utils.distributions import NormalInverseWishart as NIW
 
+from sppcax.distributions import MeanField
+from sppcax.distributions.delta import Delta
 from sppcax.types import PRNGKey
 from sppcax.models.dynamic_factor_analysis import BayesianDynamicFactorAnalysis
 from sppcax.models.utils import _make_mvnig_prior
@@ -69,16 +70,14 @@ class BayesianFactorAnalysis(BayesianDynamicFactorAnalysis):
             )
 
         # Initial prior with mode (m=0, S=I) for z ~ N(0, I).
-        # NIW mode: m = loc, S = scale / (df + dim + 2).
-        # So scale = (df + dim + 2) * I gives S = I.
         if "initial_prior" not in kw_priors:
-            df = n_components + 2.0
-            kw_priors["initial_prior"] = NIW(
-                loc=jnp.zeros(n_components),
-                mean_concentration=1.0,
-                df=df,
-                scale=df * jnp.eye(n_components),
-            )
+            kw_priors["initial_prior"] = MeanField(Delta(jnp.zeros(n_components)), Delta(jnp.eye(n_components)))
+
+        dynamics_prior = MeanField(
+            Delta(jnp.zeros((n_components, n_components + input_dim))), Delta(jnp.ones(n_components))
+        )
+
+        kw_priors["dynamics_prior"] = dynamics_prior
 
         super().__init__(
             state_dim=n_components,
