@@ -15,8 +15,10 @@ from .utils import safe_cholesky, safe_cholesky_and_logdet, cho_inv
 class MultivariateNormal(ExponentialFamily):
     """Multivariate normal distribution in natural parameters."""
 
-    nat1: Vector  # First natural parameter (precision * mean)
-    nat2: Matrix  # Second natural parameter (-0.5 * precision)
+    nat1_0: Vector  # Prior: precision_0 * mean_0 (unmasked)
+    nat2_0: Matrix  # Prior: -0.5 * precision_0 (unmasked)
+    dnat1: Vector  # Data contribution to nat1
+    dnat2: Matrix  # Data contribution to nat2
     mask: Vector  # Mask indicating active dimensions.
 
     natural_param_shape: ClassVar[Shape] = (1,)  # [nat1, nat2]
@@ -79,12 +81,11 @@ class MultivariateNormal(ExponentialFamily):
             # Default to identity matrix with proper broadcasting
             P = jnp.broadcast_to(jnp.eye(dim), (*batch_shape, dim, dim))
 
-        # Apply mask to loc
-        masked_loc = self.apply_mask_vector(loc)
-
-        # Set natural parameters
-        self.nat1 = jnp.squeeze(P @ masked_loc[..., None], -1)
-        self.nat2 = -0.5 * P
+        # Set prior natural parameters (unmasked)
+        self.nat1_0 = jnp.squeeze(P @ loc[..., None], -1)
+        self.nat2_0 = -0.5 * P
+        self.dnat1 = jnp.zeros_like(self.nat1_0)
+        self.dnat2 = jnp.zeros_like(self.nat2_0)
 
     def apply_mask_vector(self, x: Array) -> Array:
         """Apply mask to a vector, zeroing out masked dimensions.
@@ -115,6 +116,16 @@ class MultivariateNormal(ExponentialFamily):
         else:
             return jnp.where(mask_mat, x, jnp.eye(x.shape[-1]))
 
+    @property
+    def nat1(self) -> Array:
+        """First natural parameter (precision * mean), masked."""
+        return self.apply_mask_vector(self.nat1_0 + self.dnat1)
+
+    @property
+    def nat2(self) -> Array:
+        """Second natural parameter (-0.5 * precision)."""
+        return self.nat2_0 + self.dnat2
+
     @classmethod
     def from_natural_parameters(cls, nat1: Array, nat2: Array, mask: Optional[Array] = None) -> "MultivariateNormal":
         """Create MVN from natural parameters.
@@ -138,13 +149,13 @@ class MultivariateNormal(ExponentialFamily):
         return self.apply_mask_vector(mean)
 
     @property
-    def covariance(self) -> Array:
-        return self.apply_mask_matrix(cho_inv(-2.0 * self.nat2), zeromask=True)
-
-    @property
     def precision(self) -> Array:
         """Get precision parameter."""
         return self.apply_mask_matrix(-2.0 * self.nat2)
+
+    @property
+    def covariance(self) -> Array:
+        return self.apply_mask_matrix(cho_inv(self.precision), zeromask=True)
 
     def sufficient_statistics(self, x: Array) -> Array:
         """Compute sufficient statistics T(x) = [x, xx^T].
@@ -271,13 +282,8 @@ class MultivariateNormal(ExponentialFamily):
         if E_psi.ndim >= 2:
             E_psi = jnp.diag(E_psi)  # (D,)
 
-        prior_precision = -2.0 * self.nat2  # (D, dim, dim) or (dim, dim)
+        # Data contributions only — prior is preserved in nat1_0/nat2_0
+        dnat2 = -0.5 * E_psi[..., None, None] * SxxT  # (D, dim, dim) broadcast
+        dnat1 = E_psi[..., None] * SxyT.mT  # (D, dim) broadcast
 
-        # Scale data statistics by noise expected precision
-        data_precision = E_psi[..., None, None] * SxxT  # (D, dim, dim) broadcast
-        data_nat1 = E_psi[..., None] * SxyT.mT  # (D, dim) broadcast
-
-        nat2_post = -0.5 * (prior_precision + data_precision)
-        nat1_post = self.apply_mask_vector(self.nat1 + data_nat1)
-
-        return eqx.tree_at(lambda d: (d.nat1, d.nat2), self, (nat1_post, nat2_post))
+        return eqx.tree_at(lambda d: (d.dnat1, d.dnat2), self, (dnat1, dnat2))

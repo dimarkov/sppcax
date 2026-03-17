@@ -91,9 +91,14 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
 
         # MVN term: p(w|psi)
         mvn = eqx.tree_at(
-            lambda x: (x.nat1, x.nat2),
+            lambda x: (x.nat1_0, x.dnat1, x.nat2_0, x.dnat2),
             self.mvn,
-            (self.mvn.nat1 / sig_sqr[..., None], self.mvn.nat2 / sig_sqr[..., None, None]),
+            (
+                self.mvn.nat1 / sig_sqr[..., None],
+                jnp.zeros_like(self.mvn.dnat1),
+                self.mvn.nat2 / sig_sqr[..., None, None],
+                jnp.zeros_like(self.mvn.dnat2),
+            ),
         )
         mvn_log_prob = mvn.log_prob(w).sum()
 
@@ -120,7 +125,11 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
 
         # Sample x|σ² ~ MVN(μ, σ²Λ⁻¹)
         # We can sample from base MVN and scale by sqrt(σ²)
-        mvn = eqx.tree_at(lambda x: x.nat1, self.mvn, self.mvn.nat1 / sig[..., None])
+        mvn = eqx.tree_at(
+            lambda x: (x.nat1_0, x.dnat1),
+            self.mvn,
+            (self.mvn.nat1 / sig[..., None], jnp.zeros_like(self.mvn.dnat1)),
+        )
         value = mvn.sample(key_mvn, sample_shape=sample_shape) * sig[..., None]
 
         n = value.shape[-2]
@@ -166,8 +175,13 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
         return self.mvn.mean
 
     @property
+    def covariance(self) -> Array:
+        """Base covariance Λ⁻¹ of the MVN component (without noise scaling)."""
+        return self.mvn.covariance
+
+    @property
     def col_covariance(self) -> Array:
-        """Column covariance Λ⁻¹ (MVN component covariance without noise scaling)."""
+        """Column covariance Λ⁻¹ (alias for covariance)."""
         return self.mvn.covariance
 
     @property
@@ -210,19 +224,20 @@ def mvnig_posterior_update(
     # extract parameters of the prior distribution
     mvn_prior = mvnig_prior.mvn
 
-    nat1 = mvn_prior.nat1
-    prior_precision = -2.0 * mvn_prior.nat2
-
     # unpack the sufficient statistics
     SxxT, SxyT, SyyT, N = sufficient_stats
 
-    # compute parameters of the posterior distribution
-    nat2_post = -0.5 * (prior_precision + SxxT)
-    nat1_post = mvn_prior.apply_mask_vector(nat1 + SxyT.mT)
-    Syy = (SyyT if SyyT.ndim == 1 else jnp.diag(SyyT)) + jnp.sum(mvn_prior.mean * nat1, -1)
+    # compute MVN data contributions (prior preserved in nat1_0/nat2_0)
+    mvn_dnat2 = -0.5 * SxxT
+    mvn_dnat1 = SxyT.mT
 
-    mvn_post = eqx.tree_at(lambda m: (m.nat1, m.nat2), mvnig_prior.mvn, (nat1_post, nat2_post))
+    # Syy term uses prior nat1 (before data)
+    nat1_prior = mvn_prior.nat1
+    Syy = (SyyT if SyyT.ndim == 1 else jnp.diag(SyyT)) + jnp.sum(mvn_prior.mean * nat1_prior, -1)
+
+    mvn_post = eqx.tree_at(lambda m: (m.dnat1, m.dnat2), mvnig_prior.mvn, (mvn_dnat1, mvn_dnat2))
     M_pos = mvn_post.mean
+    nat1_post = mvn_post.nat1
 
     dnat1 = -N / 2
 

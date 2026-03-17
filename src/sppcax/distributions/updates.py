@@ -77,19 +77,14 @@ def posterior_update(dist, stats, props):  # noqa: F811
     if not props.weights.trainable:
         return dist
 
-    nat1 = dist.nat1
-    prior_precision = -2.0 * dist.nat2
-
     # unpack the sufficient statistics
     SxxT, SxyT, *_ = stats
 
-    # compute parameters of the posterior distribution
-    nat2_post = -0.5 * (prior_precision + SxxT)
-    nat1_post = dist.apply_mask_vector(nat1 + SxyT.mT)
+    # Data contributions only — prior preserved in nat1_0/nat2_0
+    dnat2 = -0.5 * SxxT
+    dnat1 = SxyT.mT
 
-    mvn_post = eqx.tree_at(lambda d: (d.nat1, d.nat2), dist, (nat1_post, nat2_post))
-
-    return mvn_post
+    return eqx.tree_at(lambda d: (d.dnat1, d.dnat2), dist, (dnat1, dnat2))
 
 
 # ---------------------------------------------------------------------------

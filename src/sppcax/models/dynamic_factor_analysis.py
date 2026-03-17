@@ -320,11 +320,15 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         _initial_mean = jnp.zeros(self.state_dim)
         _initial_covariance = jnp.eye(self.state_dim)
 
-        # Static mode: F=0, b=0, Q=I (FA/PCA)
+        # Dynamics defaults: b=0, Q=I
         _dynamics_bias = jnp.zeros((self.state_dim,))
         _dynamics_covariance = jnp.eye(self.state_dim)
         _dynamics_input_weights = jnp.zeros((self.state_dim, self.input_dim))
-        _dynamics_weights = jnp.zeros((self.state_dim, self.state_dim))
+        # F=I for MVNIG dynamics (avoids conjugate coupling collapse), F=0 otherwise
+        if isinstance(self.dynamics_prior, MeanField):
+            _dynamics_weights = jnp.zeros((self.state_dim, self.state_dim))
+        else:
+            _dynamics_weights = jnp.eye(self.state_dim)
 
         # MVNIG mean has shape (D, K+U+bias), extract H part
         key, _key = jr.split(key)
@@ -550,6 +554,9 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             if self.has_dynamics_bias:
                 FB = jnp.column_stack([FB, params.dynamics.bias[:, None]])
 
+        if Q.ndim < 2:
+            Q = jnp.diag(jnp.broadcast_to(Q, (FB.shape[0],)))
+
         # Unpack dynamics
         F = FB[:, : self.state_dim]
         B, b = (
@@ -732,7 +739,10 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
 
         new_weights = weights.__class__(loc=weights.mean, precision=precision, mask=weights.mask)
 
-        return eqx.tree_at(lambda p: p.weights, dynamics_prior, new_weights)
+        if isinstance(dynamics_prior, MeanField):
+            return eqx.tree_at(lambda p: p.weights, dynamics_prior, new_weights)
+        else:
+            return eqx.tree_at(lambda p: p.mvn, dynamics_prior, new_weights)
 
     def transform(
         self,

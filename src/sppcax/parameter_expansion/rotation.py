@@ -18,6 +18,7 @@ from dynamax.utils.distributions import NormalInverseWishart
 from sppcax.distributions import MultivariateNormal, MeanField
 from sppcax.distributions.mvn_gamma import MultivariateNormalInverseGamma
 from sppcax.distributions.delta import Delta
+from sppcax.distributions.gamma import InverseGamma
 from sppcax.distributions.utils import cho_inv
 from sppcax.types import Matrix, Scalar
 
@@ -234,7 +235,12 @@ def rotate_distribution(dist, R, R_inv, state_dim) -> MultivariateNormalInverseG
     new_nat2 = R_inv_block @ dist.mvn.nat2 @ R_inv_block.T
     new_nat1 = jnp.squeeze((-2 * new_nat2) @ new_mean[..., None], -1)
 
-    mvn_new = eqx.tree_at(lambda m: (m.nat1, m.nat2), dist.mvn, (new_nat1, new_nat2))
+    # Assign rotated total to _0, zero deltas
+    mvn_new = eqx.tree_at(
+        lambda m: (m.nat1_0, m.dnat1, m.nat2_0, m.dnat2),
+        dist.mvn,
+        (new_nat1, jnp.zeros_like(dist.mvn.dnat1), new_nat2, jnp.zeros_like(dist.mvn.dnat2)),
+    )
     return eqx.tree_at(lambda d: d.mvn, dist, mvn_new)
 
 
@@ -261,7 +267,12 @@ def rotate_distribution(dist, R, R_inv, state_dim) -> MultivariateNormal:  # noq
     new_nat2 = (R_inv_block @ dist.nat2 @ R_inv_block.T) / w[:, None, None]
     new_nat1 = jnp.squeeze((-2 * new_nat2) @ new_mean[..., None], -1)
 
-    return eqx.tree_at(lambda d: (d.nat1, d.nat2), dist, (new_nat1, new_nat2))
+    # Assign rotated total to _0, zero deltas
+    return eqx.tree_at(
+        lambda d: (d.nat1_0, d.dnat1, d.nat2_0, d.dnat2),
+        dist,
+        (new_nat1, jnp.zeros_like(dist.dnat1), new_nat2, jnp.zeros_like(dist.dnat2)),
+    )
 
 
 @dispatch(NormalInverseWishart, object, object, int)
@@ -272,10 +283,33 @@ def rotate_distribution(dist, R, R_inv, state_dim) -> NormalInverseWishart:  # n
     return NormalInverseWishart(new_loc, dist.mean_concentration, dist.df, new_scale)
 
 
+@dispatch(InverseGamma, object, object, int)
+def rotate_distribution(dist, R, R_inv, state_dim):  # noqa: F811
+    """Rotate diagonal IG noise for dynamics: Q -> R⁻¹ Q R⁻ᵀ, keep diagonal.
+
+    For diagonal Q = diag(q): diag(R⁻¹ Q R⁻ᵀ)_k = Σ_i (R⁻¹)²_ki q_i.
+
+    Rotates total nat2, subtracts unchanged prior to get new delta.
+    Prior nat2_0 unchanged to preserve KL(q||p). Shape params nat1 unaffected.
+    """
+    w = jnp.square(R_inv)  # (K, K), element-wise (R⁻¹)²
+    dnat2_new = w @ dist.nat2 - dist.nat2_0
+    return eqx.tree_at(lambda m: m.dnat2, dist, dnat2_new)
+
+
 @dispatch(MultivariateNormalInverseGamma, object, object, int, str)
 def rotate_distribution(dist, R, R_inv, state_dim, role) -> MultivariateNormalInverseGamma:  # noqa: F811
-    """Rotate MVNIG with role parameter (role ignored, forwards to 4-arg version)."""
-    return rotate_distribution(dist, R, R_inv, state_dim)
+    """Rotate MVNIG distribution, role-aware."""
+    if role == "emission":
+        return rotate_distribution(dist, R, R_inv, state_dim)  # existing 4-arg
+    elif role == "dynamics":
+        # MVN part: F -> R⁻¹ F R (dynamics-style rotation)
+        new_mvn = rotate_distribution(dist.mvn, R, R_inv, state_dim)
+        # IG part: rotate diagonal Q
+        new_ig = rotate_distribution(dist.inv_gamma, R, R_inv, state_dim)
+        return eqx.tree_at(lambda d: (d.mvn, d.inv_gamma), dist, (new_mvn, new_ig))
+    else:
+        raise ValueError(f"MVNIG rotation not supported for role: {role}")
 
 
 @dispatch(NormalInverseWishart, object, object, int, str)
@@ -316,7 +350,12 @@ def rotate_distribution(dist, R, R_inv, state_dim, role) -> MeanField:  # noqa: 
             new_nat2 = R_inv_block @ dist.weights.nat2 @ R_inv_block.T
             new_nat1 = jnp.squeeze((-2 * new_nat2) @ new_mean[..., None], -1)
 
-            new_weights = eqx.tree_at(lambda m: (m.nat1, m.nat2), dist.weights, (new_nat1, new_nat2))
+            # Assign rotated total to _0, zero deltas
+            new_weights = eqx.tree_at(
+                lambda m: (m.nat1_0, m.dnat1, m.nat2_0, m.dnat2),
+                dist.weights,
+                (new_nat1, jnp.zeros_like(dist.weights.dnat1), new_nat2, jnp.zeros_like(dist.weights.dnat2)),
+            )
 
         # Noise unchanged for emission (per-row, rows not mixed)
         return MeanField(weights=new_weights, noise=dist.noise)
@@ -345,7 +384,12 @@ def rotate_distribution(dist, R, R_inv, state_dim, role) -> MeanField:  # noqa: 
             tmp = R.T @ dist.weights.nat2
             new_nat1 = jnp.squeeze((-2 * tmp) @ dist.weights.mean[..., None], -1)
             new_nat2 = tmp @ R
-            new_weights = eqx.tree_at(lambda d: (d.nat1, d.nat2), dist.weights, (new_nat1, new_nat2))
+            # Assign rotated total to _0, zero deltas
+            new_weights = eqx.tree_at(
+                lambda d: (d.nat1_0, d.dnat1, d.nat2_0, d.dnat2),
+                dist.weights,
+                (new_nat1, jnp.zeros_like(dist.weights.dnat1), new_nat2, jnp.zeros_like(dist.weights.dnat2)),
+            )
 
         # Noise (covariance): S -> R_inv @ S @ R_inv^T
         if isinstance(dist.noise, Delta):

@@ -208,6 +208,7 @@ def reduce_model(model: MVN, *, key: PRNGKey, pi: float = 0.5, max_iter: int = 1
     (delta_f, sparsity_dist, lam, key), _ = lax.scan(step_fn, init, jnp.arange(max_iter))
 
     # Update the MVN distribution
-    model = eqx.tree_at(lambda x: (x.mask, x.nat1), model, (lam, jnp.where(lam, model.nat1, 0.0)))
+    # Masking is applied in the nat1 property, so just update the mask
+    model = eqx.tree_at(lambda x: x.mask, model, lam)
 
     return model
