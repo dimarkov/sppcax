@@ -6,7 +6,7 @@ import jax.numpy as jnp
 
 from ..types import Array, PRNGKey, Shape
 from .base import Distribution
-from .utils import cho_inv, safe_cholesky_and_logdet
+from .utils import cho_inv
 
 
 def default_ss(x: Array) -> Array:
@@ -97,19 +97,11 @@ class Delta(Distribution):
         return jnp.inf * jnp.ones_like(self.covariance)
 
     @property
-    def expected_precision(self) -> Array:
+    def expected_psi(self) -> Array:
         """Expected precision for Delta: matrix inverse for square matrices, element-wise otherwise."""
         if self.mean.ndim >= 2 and self.mean.shape[-1] == self.mean.shape[-2]:
             return cho_inv(self.mean)
         return 1.0 / self.mean
-
-    @property
-    def expected_logdet_precision(self) -> Array:
-        """Expected log-precision for Delta: -log|X| for matrices, -log(X) otherwise."""
-        if self.mean.ndim >= 2 and self.mean.shape[-1] == self.mean.shape[-2]:
-            _, logdet = safe_cholesky_and_logdet(self.mean)
-            return -logdet
-        return -jnp.sum(jnp.log(self.mean))
 
     @property
     def expected_second_moment(self) -> Array:
@@ -121,7 +113,7 @@ class Delta(Distribution):
         return {
             "mean": self.mean,
             "second_moment": self.expected_second_moment,
-            "expected_precision": self.expected_precision,
+            "expected_precision": self.expected_psi,
         }
 
     def mf_update(self, *args) -> "Delta":

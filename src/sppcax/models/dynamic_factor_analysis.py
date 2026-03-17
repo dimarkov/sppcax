@@ -39,6 +39,7 @@ from sppcax.distributions.updates import (
     get_ll_correction,
     get_correction,
 )
+from sppcax.distributions.utils import cho_inv
 from sppcax.inference.utils import ParamsLGSSMVB
 from sppcax.inference.smoothing import lgssm_smoother as sppcax_smoother
 
@@ -102,7 +103,18 @@ def _inflate_emission_cov(params, mask):
 
     H = params.emissions.weights
     H_masked = jnp.expand_dims(mask, -1) * H
-    result = eqx.tree_at(lambda p: (p.emissions.cov, p.emissions.weights), params, (R_inflated, H_masked))
+    bias_masked = mask * params.emissions.bias
+    input_weights = params.emissions.input_weights
+    if input_weights.ndim > 1:
+        input_weights_masked = jnp.expand_dims(mask, -1) * input_weights
+    else:
+        input_weights_masked = input_weights
+
+    result = eqx.tree_at(
+        lambda p: (p.emissions.cov, p.emissions.weights, p.emissions.bias, p.emissions.input_weights),
+        params,
+        (R_inflated, H_masked, bias_masked, input_weights_masked),
+    )
 
     # For VB params, make correction and ll time-varying
     if hasattr(params.emissions, "correction") and hasattr(params.emissions, "ll"):
@@ -257,8 +269,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         self.use_px = use_px
 
         if use_bmr:
-            # For static models, initial distribution is fixed z~N(0,I) — no BMR needed
-            self.use_bmr = ParamsBMR(initial=False, dynamics=True, emissions=True)
+            self.use_bmr = ParamsBMR(initial=False, dynamics=not is_static, emissions=True)
         else:
             self.use_bmr = ParamsBMR(initial=False, dynamics=False, emissions=False)
 
@@ -430,12 +441,12 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         kl_div = 0.0
 
         # --- 1. Compute posteriors ---
-        if self.has_ard and isinstance(self.emission_prior, (MultivariateNormalInverseGamma, MeanField)):
+        if self.has_ard:
             emission_prior = self._apply_ard_to_emission_prior(self.emission_prior, m_step_state.emission)
         else:
             emission_prior = self.emission_prior
 
-        if self.has_ard and isinstance(self.dynamics_prior, (MultivariateNormal, MeanField)) and not self.is_static:
+        if self.has_ard and not self.is_static:
             dynamics_prior = self._apply_ard_to_dynamics_prior(self.dynamics_prior, m_step_state.dynamics)
         else:
             dynamics_prior = self.dynamics_prior
@@ -502,8 +513,8 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
             ard_em_post = eqx.tree_at(lambda d: (d.dnat1, d.dnat2), self.ard_prior.emission, em_updates)
             kl_div += ard_em_post.kl_divergence_from_prior.sum()
 
-            if isinstance(dynamics_posterior, (MultivariateNormal, MeanField)) and not self.is_static:
-                dyn_updates = self._compute_dynamics_ard_updates(dynamics_posterior, self.state_dim)
+            if not self.is_static:
+                dyn_updates = self._compute_ard_updates(dynamics_posterior, self.state_dim)
                 ard_dyn_post = eqx.tree_at(lambda d: (d.dnat1, d.dnat2), self.ard_prior.dynamics, dyn_updates)
                 kl_div += ard_dyn_post.kl_divergence_from_prior.sum()
             else:
@@ -641,45 +652,42 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         )
 
     @staticmethod
-    def _compute_ard_updates(
-        emission_posterior: MultivariateNormalInverseGamma, state_dim: int
-    ) -> Tuple[Vector, Vector]:
-        """Compute ARD natural parameter updates from emission posterior.
+    def _compute_ard_updates(posterior, state_dim: int) -> Tuple[Vector, Vector]:
+        """Compute ARD natural parameter updates from emission or dynamics posterior.
+
+        Works for MVNIG (coupled), MeanField (factorized), and MNIW posteriors.
+
+        For coupled (MVNIG/MNIW): E[ψ·w²] = V_kk + E[ψ]·m²  (noise cancels in variance)
+        For factorized (MeanField): E[ψ·w²] = E[ψ]·(V_kk + m²)  (no cancellation)
+
+        get_correction encapsulates this: returns col_cov for coupled, E[ψ]·V for factorized.
 
         Returns (dnat1_tau, dnat2_tau) to be applied to the ARD prior outside JIT.
         """
-        W = emission_posterior.mvn.mean  # (D, K+U+bias)
-        W_emission = W[:, :state_dim]  # (D, K)
-        cov_w = emission_posterior.mvn.covariance  # (D, K+U+bias, K+U+bias)
-        sigma_sqr_w = jnp.diagonal(cov_w, axis1=-1, axis2=-2)[:, :state_dim]  # (D, K)
-        exp_psi = emission_posterior.expected_psi  # (D,) or scalar
+        from dynamax.utils.distributions import MatrixNormalInverseWishart
 
-        mask = emission_posterior.mvn.mask[:, :state_dim]  # (D, K)
-        dnat1_tau = 0.5 * mask.sum(0)
-        dnat2_tau = -0.5 * jnp.sum((sigma_sqr_w + jnp.square(W_emission)) * exp_psi[..., None], 0)
+        C = get_correction(posterior)  # (D, dim, dim) — coupled/factorized handled
+        correction_diag = jnp.diagonal(C, axis1=-1, axis2=-2)[:, :state_dim]  # (D, K)
 
-        return dnat1_tau, dnat2_tau
+        if isinstance(posterior, MatrixNormalInverseWishart):
+            W = posterior.loc[:, :state_dim]  # (D, K)
+            D, _ = posterior._matrix_normal_shape
+            exp_psi = jnp.diag(posterior.df * cho_inv(posterior.scale))  # (D,)
+        else:
+            W = posterior.mvn.mean[:, :state_dim]  # (D, K)
+            exp_psi = posterior.expected_psi  # scalar, (D,), or (D, D)
+            if exp_psi.ndim >= 2:
+                exp_psi = jnp.diag(exp_psi)  # (D,)
 
-    @staticmethod
-    def _compute_dynamics_ard_updates(dynamics_posterior: MultivariateNormal, state_dim: int) -> Tuple[Vector, Vector]:
-        """Compute ARD natural parameter updates from dynamics posterior (MVN).
-
-        For MVN dynamics with fixed Q=I, there is no per-row noise scaling.
-
-        Returns (dnat1_tau, dnat2_tau) to be applied to the dynamics ARD prior.
-        """
-        W = dynamics_posterior.mean[:, :state_dim]  # (K, K)
-        cov_w = dynamics_posterior.covariance  # (K, dim, dim)
-        sigma_sqr_w = jnp.diagonal(cov_w, axis1=-1, axis2=-2)[:, :state_dim]  # (K, K)
-
-        mask = dynamics_posterior.mask[:, :state_dim]  # (K, K)
-        dnat1_tau = 0.5 * mask.sum(0)
-        dnat2_tau = -0.5 * jnp.sum(sigma_sqr_w + jnp.square(W), 0)
+        dnat1_tau = jnp.broadcast_to(0.5 * W.shape[0], (state_dim,))  # (K,)
+        dnat2_tau = -0.5 * jnp.sum(correction_diag + jnp.square(W) * exp_psi[..., None], 0)  # (K,)
 
         return dnat1_tau, dnat2_tau
 
     @staticmethod
-    def _apply_ard_to_emission_prior(emission_prior, m_step_state: Gamma):
+    def _apply_ard_to_emission_prior(
+        emission_prior: Union[MeanField, MultivariateNormalInverseGamma], m_step_state: Gamma
+    ):
         """Modify emission prior precision by incorporating ARD tau from previous iteration.
 
         Reconstructs the ARD posterior from m_step_state, computes E[tau], and adds it
@@ -696,8 +704,7 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         # Access weights component (works for both MVNIG.mvn and MeanField.weights)
         weights = emission_prior.mvn
         loc = weights.mean
-        precision = weights.precision
-        precision = precision.at[:, :K, :K].set(jnp.diag(E_tau))
+        precision = weights.precision.at[:, :K, :K].set(jnp.diag(E_tau))
         mask = weights.mask
         mvn = MultivariateNormal(loc=loc, precision=precision, mask=mask)
 
@@ -716,14 +723,16 @@ class BayesianDynamicFactorAnalysis(LinearGaussianConjugateSSM):
         K = len(E_tau)
 
         # Access weights component (works for both MVN directly and MeanField.weights)
-        weights = dynamics_prior.mvn if isinstance(dynamics_prior, MeanField) else dynamics_prior
-        precision = weights.precision.at[:, :K, :K].set(jnp.diag(E_tau))
-        new_weights = MultivariateNormal(loc=weights.mean, precision=precision, mask=weights.mask)
-
-        if isinstance(dynamics_prior, MeanField):
-            return eqx.tree_at(lambda p: p.weights, dynamics_prior, new_weights)
+        weights = dynamics_prior.mvn
+        precision = weights.precision
+        if precision.ndim > 2:
+            precision = weights.precision.at[:, :K, :K].set(jnp.diag(E_tau))
         else:
-            return new_weights
+            precision = weights.precision.at[:K, :K].set(jnp.diag(E_tau))
+
+        new_weights = weights.__class__(loc=weights.mean, precision=precision, mask=weights.mask)
+
+        return eqx.tree_at(lambda p: p.weights, dynamics_prior, new_weights)
 
     def transform(
         self,

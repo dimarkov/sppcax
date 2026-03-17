@@ -48,8 +48,19 @@ def _px_rotation_loss(
 
     # ── Term 0: L_initial  E[-ln p(x_0|R)]  ────────────────────────────────
     sum_x0, sum_x0x0T, N_seqs = init_stats
-    S_0 = initial_posterior.scale / initial_posterior.df
-    m_0 = initial_posterior.loc
+    if isinstance(initial_posterior, MeanField):
+        m_0 = initial_posterior.mean
+        # For IW noise: (E[Sigma^-1])^-1 = scale / df
+        # For Delta noise: just the value
+        if isinstance(initial_posterior.noise, Delta):
+            S_0 = initial_posterior.noise.mean
+        else:
+            S_0 = initial_posterior.noise.scale / initial_posterior.noise.df
+    else:
+        # NormalInverseWishart
+        S_0 = initial_posterior.scale / initial_posterior.df
+        m_0 = initial_posterior.loc
+
     S_0_inv = cho_inv(S_0)
 
     RinvX = R_inv @ sum_x0x0T @ R_inv.T
@@ -71,6 +82,7 @@ def _px_rotation_loss(
         second_moment_em = psi[:, None, None] * (m_em[:, :, None] * m_em[:, None, :] + Sigma_em)
     else:
         second_moment_em = psi[:, None, None] * m_em[:, :, None] * m_em[:, None, :] + Sigma_em
+
     SM_rot = jnp.einsum("ij,djk,kl->dil", R_block_em.T, second_moment_em, R_block_em)
     trace_em = jnp.einsum("dij,dji->d", Lambda, SM_rot)
     cross_em = jnp.einsum("di,dij,jk,dk->d", mu, Lambda, R_block_em.T, m_em)
@@ -103,8 +115,16 @@ def _px_rotation_loss(
     diag_corr = jnp.einsum("kij,ji->k", Sigma_F, sum_zpzpT)
     S_res = S_res + jnp.diag(diag_corr)
 
-    RRT_inv = R_inv.T @ R_inv
-    L_dyn_lik = 0.5 * jnp.einsum("ij,ji->", RRT_inv, S_res) + T_total * logdet_R
+    # Get E[Q⁻¹] from dynamics posterior noise component
+    if isinstance(dynamics_posterior, MeanField) and not isinstance(dynamics_posterior.noise, Delta):
+        E_Q_inv = dynamics_posterior.expected_psi  # matrix for IW, vector for IG
+        if E_Q_inv.ndim == 1:
+            E_Q_inv = jnp.diag(E_Q_inv)
+        Q_inv_rot = R_inv.T @ E_Q_inv @ R_inv
+    else:
+        # Delta noise (Q=I) or bare MVN
+        Q_inv_rot = R_inv.T @ R_inv
+    L_dyn_lik = 0.5 * jnp.einsum("ij,ji->", Q_inv_rot, S_res) + T_total * logdet_R
 
     return L_em + L_dyn_prior + L_dyn_lik + L_init
 
@@ -258,12 +278,6 @@ def rotate_distribution(dist, R, R_inv, state_dim, role) -> MultivariateNormalIn
     return rotate_distribution(dist, R, R_inv, state_dim)
 
 
-@dispatch(MultivariateNormal, object, object, int, str)
-def rotate_distribution(dist, R, R_inv, state_dim, role) -> MultivariateNormal:  # noqa: F811
-    """Rotate MVN with role parameter (role ignored, forwards to 4-arg version)."""
-    return rotate_distribution(dist, R, R_inv, state_dim)
-
-
 @dispatch(NormalInverseWishart, object, object, int, str)
 def rotate_distribution(dist, R, R_inv, state_dim, role) -> NormalInverseWishart:  # noqa: F811
     """Rotate NIW with role parameter (role ignored, forwards to 4-arg version)."""
@@ -312,29 +326,25 @@ def rotate_distribution(dist, R, R_inv, state_dim, role) -> MeanField:  # noqa: 
         if isinstance(dist.weights, Delta):
             new_weights = dist.weights
         else:
-            dim = dist.weights.nat1.shape[-1]
-            R_block = jnp.eye(dim).at[:K, :K].set(R)
-            R_inv_block = jnp.eye(dim).at[:K, :K].set(R_inv)
-
-            new_mean = R_inv @ dist.weights.mean @ R_block
-            w = jnp.sum(jnp.square(R_inv), -1)  # (K, K)
-            new_nat2 = (R_inv_block @ dist.weights.nat2 @ R_inv_block.T) / w[:, None, None]
-            new_nat1 = jnp.squeeze((-2 * new_nat2) @ new_mean[..., None], -1)
-
-            new_weights = eqx.tree_at(lambda d: (d.nat1, d.nat2), dist.weights, (new_nat1, new_nat2))
+            dim = dist.weights.nat1.shape[0]
+            new_weights = rotate_distribution(dist.weights, R, R_inv, dim)
+            if isinstance(dist.noise, Delta):
+                new_noise = dist.noise
+            else:
+                new_noise = rotate_distribution(dist.noise, R, R_inv, dim)
 
         # Noise unchanged for dynamics (Delta(I) stays identity)
-        return MeanField(weights=new_weights, noise=dist.noise)
+        return MeanField(weights=new_weights, noise=new_noise)
 
     elif role == "initial":
         # Initial mean: m -> R_inv @ m
         if isinstance(dist.weights, Delta):
             new_weights = dist.weights
         else:
-            new_mean = R_inv @ dist.weights.mean
             # For initial, precision rotates as: P_new = R @ P @ R^T
-            new_nat2 = R_inv @ dist.weights.nat2 @ R_inv.T
-            new_nat1 = jnp.squeeze((-2 * new_nat2) @ new_mean[..., None], -1)
+            tmp = R.T @ dist.weights.nat2
+            new_nat1 = jnp.squeeze((-2 * tmp) @ dist.weights.mean[..., None], -1)
+            new_nat2 = tmp @ R
             new_weights = eqx.tree_at(lambda d: (d.nat1, d.nat2), dist.weights, (new_nat1, new_nat2))
 
         # Noise (covariance): S -> R_inv @ S @ R_inv^T
@@ -343,12 +353,20 @@ def rotate_distribution(dist, R, R_inv, state_dim, role) -> MeanField:  # noqa: 
             val = dist.noise.mean
             if val.ndim >= 2:
                 new_val = R_inv @ val @ R_inv.T
-                new_noise = Delta(new_val)
+            else:
+                new_noise = R_inv @ (val * jnp.eye(R_inv.shape[-1])) @ R_inv.T
+            new_noise = Delta(new_val)
+        else:
+            # InverseWishart: rotate scale S -> R_inv @ S @ R_inv^T
+            # nat2 = -S/2, so nat2_new = -R_inv @ S @ R_inv^T / 2 = R_inv @ nat2 @ R_inv^T
+            from sppcax.distributions.inverse_wishart import InverseWishart as SppcaxIW
+
+            if isinstance(dist.noise, SppcaxIW):
+                new_nat2_0 = R_inv @ dist.noise.nat2_0 @ R_inv.T
+                new_dnat2 = R_inv @ dist.noise.dnat2 @ R_inv.T
+                new_noise = eqx.tree_at(lambda m: (m.nat2_0, m.dnat2), dist.noise, (new_nat2_0, new_dnat2))
             else:
                 new_noise = dist.noise
-        else:
-            # Generic rotation for noise component (e.g., InverseWishart)
-            new_noise = dist.noise  # TODO: implement IW rotation if needed
 
         return MeanField(weights=new_weights, noise=new_noise)
 

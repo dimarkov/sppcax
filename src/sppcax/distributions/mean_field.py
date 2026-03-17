@@ -9,6 +9,7 @@ from ..types import Array, PRNGKey, Shape
 from .base import Distribution
 from .delta import Delta
 from .gamma import InverseGamma
+from .inverse_wishart import InverseWishart
 
 
 class MeanField(Distribution):
@@ -66,22 +67,27 @@ class MeanField(Distribution):
     @property
     def expected_psi(self) -> Array:
         """Expected noise precision E[1/sigma^2] from noise component."""
-        return self.noise.expected_precision
-
-    @property
-    def expected_log_psi(self) -> Array:
-        """Expected log noise precision from noise component."""
-        return self.noise.expected_log_precision
+        return self.noise.expected_psi
 
     @property
     def expected_covariance(self) -> Array:
-        """Expected covariance E[sigma^2] * base_covariance."""
+        """Expected covariance E[sigma^2] * base_covariance.
+
+        For InverseGamma noise: scalar E[sigma^2] per row.
+        For InverseWishart noise: full matrix E[Sigma], not factored with weights cov.
+        For Delta noise: fixed value.
+        """
+
         if isinstance(self.noise, Delta):
             exp_var = self.noise.mean
         elif isinstance(self.noise, InverseGamma):
             exp_var = jnp.broadcast_to(self.noise.mean, self.batch_shape)
+        elif isinstance(self.noise, InverseWishart):
+            # IW noise: E[Sigma] is already a full (k,k) matrix
+            exp_var = jnp.diag(self.noise.mean)
         else:
-            exp_var = jnp.broadcast_to(1.0 / self.noise.expected_precision, self.batch_shape)
+            raise NotImplementedError
+
         return self.weights.covariance * exp_var[..., None, None]
 
     @property
@@ -131,26 +137,10 @@ class MeanField(Distribution):
             Tuple of (noise covariance as matrix, weights mean).
         """
         mean = self.weights.mean
-
-        if isinstance(self.noise, InverseGamma):
-            dim = self.event_shape[-1]
-            sigma_sqr_mode = self.noise.beta / (self.noise.alpha + (dim + 2) / 2)
-            n = self.batch_shape[0] if self.batch_shape else 1
-            cov = jnp.eye(n) * jnp.broadcast_to(sigma_sqr_mode, (n,))[:, None]
-        elif isinstance(self.noise, Delta):
-            cov = self.noise.mean
-            # Ensure matrix form
-            if cov.ndim == 1:
-                cov = jnp.diag(cov)
-            elif cov.ndim == 0:
-                n = self.batch_shape[0] if self.batch_shape else 1
-                cov = cov * jnp.eye(n)
-        else:
-            # Generic: use mean as mode approximation
-            cov = self.noise.mean
-            if hasattr(cov, "ndim") and cov.ndim < 2:
-                n = self.batch_shape[0] if self.batch_shape else 1
-                cov = jnp.diag(jnp.broadcast_to(cov, (n,)))
+        cov = self.noise.mode()
+        if cov.ndim < 2:
+            n = self.batch_shape[0]
+            cov = jnp.broadcast_to(cov, (n,))
 
         return cov, mean
 
@@ -167,27 +157,27 @@ class MeanField(Distribution):
         key_w, key_n = jr.split(seed)
 
         weights_sample = self.weights.sample(key_w, sample_shape)
-
-        if isinstance(self.noise, InverseGamma):
-            noise_sample = self.noise.sample(key_n, sample_shape)
+        noise_sample = self.noise.sample(key_n, sample_shape)
+        if noise_sample.ndim < 1:
             n = self.batch_shape[0] if self.batch_shape else 1
-            noise_cov = jnp.eye(n) * jnp.broadcast_to(noise_sample, (n,))[:, None]
-        elif isinstance(self.noise, Delta):
-            noise_cov = self.noise.mean
-            if noise_cov.ndim == 1:
-                noise_cov = jnp.diag(noise_cov)
-            elif noise_cov.ndim == 0:
-                n = self.batch_shape[0] if self.batch_shape else 1
-                noise_cov = noise_cov * jnp.eye(n)
+            noise_cov = jnp.broadcast(noise_sample, (n,))
         else:
-            noise_sample = self.noise.sample(key_n, sample_shape)
             noise_cov = noise_sample
 
         return noise_cov, weights_sample
 
-    def log_prob(self, x) -> Array:
-        """Log probability (sum of component log-probs)."""
-        raise NotImplementedError("MeanField log_prob requires separate component values")
+    def log_prob(self, x: Tuple[Array, Array]) -> Array:
+        """Compute log probability.
+
+        Args:
+            x: Tuple of (cov, w) where:
+                w: Value of the sample state
+                cov: Value of the sample covariance
+
+        Returns:
+            Log probability
+        """
+        return self.noise.log_prob(x[0]) + self.noise.log_prob(x[1])
 
     def entropy(self) -> Array:
         """Entropy of the mean-field distribution (sum of component entropies)."""

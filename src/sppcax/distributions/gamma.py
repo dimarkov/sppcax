@@ -266,6 +266,14 @@ class InverseGamma(ExponentialFamily):
         """Get mean E[x] = β/(α-1)."""
         return self.beta / (self.alpha - 1)
 
+    def mode(self) -> Array:
+        return self.beta / (self.alpha + 1)
+
+    @property
+    def expected_psi(self) -> Array:
+        """Expected precision E[1/x] = alpha/beta for InverseGamma."""
+        return self.alpha / self.beta
+
     @property
     def natural_parameters(self) -> Array:
         """Get natural parameters η = [-α-1, -β].
@@ -386,31 +394,19 @@ class InverseGamma(ExponentialFamily):
 
         return -self.log_normalizer + other_log_normalizer + inner_product
 
-    @property
-    def expected_precision(self) -> Array:
-        """Expected precision E[1/x] = alpha/beta for InverseGamma."""
-        return self.alpha / self.beta
-
-    @property
-    def expected_log_precision(self) -> Array:
-        """Expected log-precision E[-log(x)] = digamma(alpha) - log(beta)."""
-        return jsp.digamma(self.alpha) - jnp.log(self.beta)
-
     def mf_expectations(self) -> dict:
         """Return expectations for mean-field coordinate ascent partner."""
         return {
-            "expected_precision": self.expected_precision,
-            "expected_log_precision": self.expected_log_precision,
+            "expected_precision": self.expected_psi,
         }
 
-    def mf_update(self, prior: "InverseGamma", stats: tuple, partner_expectations: dict) -> "InverseGamma":
+    def mf_update(self, stats: tuple, partner_expectations: dict) -> "InverseGamma":
         """Mean-field coordinate ascent update for InverseGamma noise.
 
         Given partner (weights) expectations, compute the residual and update
         the InverseGamma natural parameters.
 
         Args:
-            prior: Prior InverseGamma distribution.
             stats: Sufficient statistics tuple (SxxT, SxyT, SyyT, N).
             partner_expectations: Dict with 'mean' and 'second_moment' from weights.
 
@@ -441,9 +437,9 @@ class InverseGamma(ExponentialFamily):
         dnat2 = -residual / 2
 
         # For isotropic noise (scalar batch), sum across features
-        if prior.batch_shape == ():
+        if self.batch_shape == ():
             D = dnat2.shape[0]
             dnat1 = dnat1 * D if jnp.ndim(dnat1) == 0 else dnat1.sum()
             dnat2 = dnat2.sum()
 
-        return eqx.tree_at(lambda m: (m.dnat1, m.dnat2), prior, (dnat1, dnat2))
+        return eqx.tree_at(lambda m: (m.dnat1, m.dnat2), self, (dnat1, dnat2))

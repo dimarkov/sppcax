@@ -4,7 +4,6 @@ from typing import Optional, Tuple
 
 import jax.numpy as jnp
 import jax.random as jr
-import jax.scipy.special as jsp
 import equinox as eqx
 
 from ..types import Array, PRNGKey, Shape
@@ -124,7 +123,8 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
         mvn = eqx.tree_at(lambda x: x.nat1, self.mvn, self.mvn.nat1 / sig[..., None])
         value = mvn.sample(key_mvn, sample_shape=sample_shape) * sig[..., None]
 
-        return sig_sqr * jnp.eye(value.shape[-2]), value
+        n = value.shape[-2]
+        return jnp.broadcast_to(sig_sqr, (n,)), value
 
     def mode(self) -> Tuple[Array, Array]:
         r"""Solve for the mode. Recall,
@@ -143,7 +143,7 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
         dim = self.event_shape[-1]
         sigma_sqr_mode = self.beta / (self.alpha + (dim + 2) / 2)
         n = self.batch_shape[0] if self.batch_shape else 1
-        return jnp.eye(n) * jnp.broadcast_to(sigma_sqr_mode, (n,))[:, None], self.mean
+        return jnp.broadcast_to(sigma_sqr_mode, (n,)), self.mean
 
     @property
     def alpha(self) -> Array:
@@ -179,12 +179,12 @@ class MultivariateNormalInverseGamma(ExponentialFamily):
     @property
     def expected_psi(self) -> Array:
         """Compute expected precision E[psi]."""
-        return jnp.broadcast_to(self.inv_gamma.alpha / self.inv_gamma.beta, self.batch_shape)
+        return jnp.broadcast_to(self.inv_gamma.expected_psi, self.batch_shape)
 
     @property
     def expected_log_psi(self) -> Array:
         """Compute expected log precision E[log(psi)]."""
-        return jnp.broadcast_to(jsp.digamma(self.inv_gamma.alpha) - jnp.log(self.inv_gamma.beta), self.batch_shape)
+        return jnp.broadcast_to(self.inv_gamma.expected_log_psi, self.batch_shape)
 
     @property
     def expected_sufficient_statistics_psi(self) -> Array:
@@ -226,7 +226,6 @@ def mvnig_posterior_update(
 
     dnat1 = -N / 2
 
-    # shouldn't SxyT be nat1_post instead?
     dnat2 = -(Syy - jnp.sum(M_pos * nat1_post, -1)) / 2
 
     # For isotropic noise (PCA), sum dnat across features since all share one variance
